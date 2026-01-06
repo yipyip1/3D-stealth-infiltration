@@ -1656,7 +1656,7 @@ def draw_hud():
     
     if game_state == GAME_OUTSIDE:
         glColor3f(1, 1, 0)
-        draw_text(W//2 - 100, 50, "Find the haunted house door!")
+        draw_text(W//2 - 100, 50, "Find the Chamber!")
     elif game_state == GAME_WIN:
         glColor3f(0, 1, 0)
         draw_text(W//2 - 80, H//2, "YOU ESCAPED!")
@@ -2011,7 +2011,7 @@ def main():
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
     glutInitWindowSize(W, H)
     glutInitWindowPosition(100, 50)
-    glutCreateWindow(b"Haunted House Survival")
+    glutCreateWindow(b"3d Stealth Game")
     
                                                                  
                                                                                    
