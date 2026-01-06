@@ -663,7 +663,7 @@ def update_player():
 
 
 def update_bullets():
-    global bullets, enemies, player_lives, game_state, last_game_state
+    global bullets, enemies
     kept = []
     for bullet in bullets:
         bx, by, bz, vx, vy, vz, frames = bullet
@@ -679,16 +679,6 @@ def update_bullets():
                         
         if check_wall_collision(bx, by, 5):
             continue
-
-        # Check if bullet hits player
-        if game_state == GAME_INSIDE:
-            player_dist = distance_2d(bx, by, player_pos[0], player_pos[1])
-            if player_dist < 15:
-                player_lives -= 1
-                if player_lives <= 0:
-                    last_game_state = game_state
-                    game_state = GAME_LOSE
-                continue
 
                                        
         hit = False
@@ -1335,21 +1325,6 @@ def draw_enemy(enemy):
         gluSphere(quadric, 1.6, 8, 8)
         glPopMatrix()
     glPopMatrix()
-    
-    glPushMatrix()
-    glTranslatef(ex, ey, 10)
-    glRotatef(-angle + 90, 0, 0, 1)
-    
-    glColor4f(1.0, 1.0, 0.0, 0.3) if not alerted else glColor4f(1.0, 0.0, 0.0, 0.5)
-    glBegin(GL_TRIANGLES)
-    rad_left = math.radians(-CONE_ANGLE)
-    rad_right = math.radians(CONE_ANGLE)
-    glVertex3f(0, 0, 0)
-    glVertex3f(CONE_LENGTH * math.cos(rad_left), CONE_LENGTH * math.sin(rad_left), 0)
-    glVertex3f(CONE_LENGTH * math.cos(rad_right), CONE_LENGTH * math.sin(rad_right), 0)
-    glEnd()
-    
-    glPopMatrix()
 
 def draw_pickup(pickup):
     px, py, ptype, collected = pickup
@@ -1649,6 +1624,11 @@ def draw_hud():
         else:
             glColor3f(1.0, 0.8, 0.2)
             draw_text(W - 150, H - 55, f"Enemies: {len(living_enemies)}")
+        
+        # Detection meter display
+        meter_color = (1.0, 1.0, 0.0) if detection_meter < 70 else (1.0, 0.3, 0.0)
+        glColor3f(*meter_color)
+        draw_text(10, H - 105, f"Detection: {int(detection_meter)}%")
     
     if paused:
         glColor3f(1, 1, 1)
@@ -1794,67 +1774,111 @@ def mouse(button, state, x, y):
             player_weapon_state = 0
 
 def update_enemies():
-    global player_hp, game_state, last_game_state, invisibility_active, player_lives, bullets
+    global player_hp, game_state, last_game_state, invisibility_active, player_lives, detection_level, detection_meter, detected, seen_frames
+    
+    if game_state != GAME_INSIDE:
+        detection_meter = 0.0
+        detected = False
+        seen_frames = 0
+        return
+    
     now = time.perf_counter()
     level_def = LEVEL_DEFS.get(current_level, LEVEL_DEFS[1])
     enemy_damage = level_def.get('enemy_damage', ENEMY_DAMAGE)
+    enemy_detection_radius = level_def.get('detection_radius', ENEMY_DETECTION_RADIUS)
+    
+    # Compute visibility strength from all enemies
+    visibility_strength = 0.0
     
     for e in enemies:
         if not e.get('alive', True):
             continue
         
-        old_angle = e.get('angle', 0)
-        e['angle'] = (old_angle + e.get('rot_dir', 1) * 1.5) % 360
+        ex = e.get('x', 0)
+        ey = e.get('y', 0)
         
-        rad = math.radians(e['angle'])
-        cone_end_x = e['x'] + math.cos(rad) * CONE_LENGTH
-        cone_end_y = e['y'] + math.sin(rad) * CONE_LENGTH
-        
-        if line_intersects_wall(e['x'], e['y'], cone_end_x, cone_end_y):
-            e['rot_dir'] = -e.get('rot_dir', 1)
-            e['angle'] = old_angle
+        # Check player distance
+        dx = player_pos[0] - ex
+        dy = player_pos[1] - ey
+        dist = math.hypot(dx, dy)
         
         player_detectable = not invisibility_active
         
-        dx = player_pos[0] - e['x']
-        dy = player_pos[1] - e['y']
-        dist = math.hypot(dx, dy)
-        
-        if dist <= CONE_LENGTH and player_detectable:
-            ang_to_player = math.degrees(math.atan2(dy, dx))
-            diff = abs(normalize_angle(ang_to_player - e['angle']))
-            if diff > 180:
-                diff = 360 - diff
-            if diff < CONE_ANGLE and not line_intersects_wall(e['x'], e['y'], player_pos[0], player_pos[1]):
+        if dist < enemy_detection_radius and player_detectable:
+            # Can see player?
+            if not line_intersects_wall(ex, ey, player_pos[0], player_pos[1]):
+                # This enemy can see player
+                enemy_vis = max(0.0, 1.0 - dist / enemy_detection_radius)
+                enemy_vis = enemy_vis * enemy_vis  # Non-linear: distant sight contributes much less
+                visibility_strength = max(visibility_strength, enemy_vis)
+                
+                # Chase state
+                e['state'] = 1
                 e['alerted'] = True
                 e['alert_timer'] = now
                 
-                if now > e.get('attack_cd', 0):
-                    # Enemy shoots a bullet at player - aim at player's position
-                    angle_to_player = math.atan2(dy, dx)
-                    vx = math.cos(angle_to_player) * BULLET_SPEED * 0.7
-                    vy = math.sin(angle_to_player) * BULLET_SPEED * 0.7
-                    bullets.append([e['x'], e['y'], 20, vx, vy, 0, BULLET_LIFETIME])
-                    e['attack_cd'] = now + 0.7
+                # Attack if close (melee damage, not bullets)
+                if dist < ENEMY_ATTACK_RADIUS:
+                    if now > e.get('attack_cd', 0):
+                        player_lives -= 1
+                        e['attack_cd'] = now + 1.0
+                        if player_lives <= 0:
+                            last_game_state = game_state
+                            game_state = GAME_LOSE
+            else:
+                # Lost sight
+                e['state'] = 0
+                e['alerted'] = False
+        else:
+            # Out of range
+            e['state'] = 0
+            e['alerted'] = False
         
-        if e.get('alerted'):
-            if dist > 25 or not player_detectable:
-                if now - e.get('alert_timer', now) > 2.0:
-                    e['alerted'] = False
+        # Movement - chase player if alerted
+        if e.get('state', 0) == 1 and e.get('alerted', False):
+            angle_to_player = math.degrees(math.atan2(dy, dx))
+            e['angle'] = angle_to_player
+            
+            # Faster if fully detected
+            speed = ENEMY_SPEED * (1.3 if detected else 1.0)
+            
+            rad = math.radians(angle_to_player)
+            new_x = ex + math.cos(rad) * speed
+            new_y = ey + math.sin(rad) * speed
+            
+            if not check_wall_collision(new_x, new_y, ENEMY_RADIUS):
+                e['x'] = new_x
+                e['y'] = new_y
         
+        # Cooldown
+        if e.get('attack_cd', 0) > now:
+            pass  # Still on cooldown
+        
+        # Handle distraction
         if e.get('distraction_until', 0) > now:
-            tx, ty = e.get('distraction_target', (e['x'], e['y']))
-            e['angle'] = math.degrees(math.atan2(ty - e['y'], tx - e['x']))
-        
-        if e.get('alerted'):
-            for other in enemies:
-                if other is e or not other.get('alive'):
-                    continue
-                if other.get('corridor') == e.get('corridor'):
-                    d = math.hypot(other['x'] - e['x'], other['y'] - e['y'])
-                    if 10 <= d <= 15:
-                        other['alerted'] = True
-                        other['alert_timer'] = now
+            tx, ty = e.get('distraction_target', (ex, ey))
+            e['angle'] = math.degrees(math.atan2(ty - ey, tx - ex))
+    
+    # Update detection meter (persistent) with grace period
+    if visibility_strength > 0:
+        seen_frames += 1
+    else:
+        seen_frames = 0
+    
+    # Only build detection after being seen for 20 frames (grace period)
+    if seen_frames >= 20:
+        detection_meter += visibility_strength * 0.8  # Build up
+    elif visibility_strength == 0:
+        detection_meter -= 1.5  # Decay when not visible
+    
+    # Clamp
+    detection_meter = max(0.0, min(100.0, detection_meter))
+    
+    # Set detected flag
+    detected = (detection_meter >= 85)
+    
+    # Store for HUD
+    detection_level = visibility_strength
 
 
 def update():
