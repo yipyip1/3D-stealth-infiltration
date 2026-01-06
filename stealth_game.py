@@ -1,1772 +1,2036 @@
-
-"""
-Simple PyOpenGL Stealth Maze Game - ENHANCED WITH 12 STEALTH FEATURES
-
-PART 1: Core Stealth World & Basic AI
-1) Vision Cones with Line-of-Sight
-2) Patrol Routes (Semi-Procedural)
-3) Detection Meter (Gradual)
-4) Light & Shadow Zones (Fake Lighting)
-
-PART 2: Intelligence, Interaction & Stealth Tools
-5) Guard States (PATROL, SUSPICIOUS, ALERT, SEARCH, RETURN)
-6) Sound / Noise System (footsteps, doors, objects create noise)
-7) Distraction Tool (throw objects)
-8) Hiding Spots (become invisible in crates/corners)
-
-PART 3: Game Systems, Progression & Win Conditions
-9) Non-Lethal Takedown (knock out from behind)
-10) Keycards & Locked Doors (doors block movement, require keys)
-11) Alarm Level System (Global) (affects guard behavior)
-12) Objective-Based Win Condition (hack terminals, reach exit)
-
-Controls:
-W/A/S/D      - Move forward/left/back/right
-Arrow Keys   - Rotate player
-C            - Toggle camera (3rd / 1st person)
-F            - Melee / Takedown / Interact
-G            - Throw distraction object
-E            - Hack terminal (if in range)
-H            - Hide (toggle hiding spot)
-R            - Reset level
-P            - Pause
-ESC          - Quit
-
-Run: python stealth_maze_new.py
-"""
+BULLET_SPEED = 18.0
+BULLET_LIFETIME = 50
+FIRE_COOLDOWN = 8                        
 
 from OpenGL.GL import *
 from OpenGL.GLUT import *
 from OpenGL.GLU import *
-import time
 import math
 import random
-import sys
+import time
 
-# ---------------------------
-# Constants / configuration
-# ---------------------------
-WINDOW_W, WINDOW_H = 1200, 800
-GRID = 1  # logical cell size unit; we will map to world units
-CELL = 60  # world size for each cell (in units) - smaller corridors
-CORRIDOR_HEIGHT = 240  # wall height - tall enough to block sight between corridors
-PLAYER_SIZE = 12  # character body size (hero and enemies same) - smaller
-PLAYER_HEIGHT = 30  # reduced height for slimmer look
-WALL_HEIGHT = 200  # tall pillar walls that block vision
-PLAYER_SPEED = 160.0  # units/sec (scaled for larger cells)
-ENEMY_SPEED = 110.0
-ENEMY_CHASE_SPEED = 180.0
-ROT_SPEED = 90.0  # degrees per second (slower rotation)
-BULLET_SPEED = 420.0
-BULLET_RADIUS = 4
-DOOR_OPEN_TIME = 2.0
-DOOR_RELOCK_TIME = 6.0
-POWERUP_DURATION = 10.0
-MAX_ALERTED_NEARBY = 2  # only 1-2 nearby enemies may become alerted
-# Melee / hand collision settings
-KNIFE_DAMAGE = 1.75
-UNARMED_DAMAGE = 1.0
-MELEE_COOLDOWN_KNIFE = 0.3
-MELEE_COOLDOWN_UNARMED = 0.5
-MELEE_RANGE = PLAYER_SIZE * 1.3
-UNARMED_INTERACTIONS_TO_KILL = 3
+                               
+W, H = 1200, 900
+GRID_SIZE = 40
+GRID_TILES = 21
+MAZE_SIZE = GRID_SIZE * GRID_TILES // 2
 
-# Game states
-STATE_PLAY = 0
-STATE_PAUSE = 1
-STATE_GAMEOVER = 2
+                   
+MOVE_SPEED = 3.0
+PLAYER_MAX_HP = 100
+PLAYER_RADIUS = 13
 
-# Camera modes
-CAM_THIRD = 0
-CAM_FIRST = 1
+        
+CAMERA_DISTANCE = 140
+CAMERA_MIN_DISTANCE = 60
+CAMERA_HEIGHT = 500
+CAMERA_SMOOTH = 0.15
+CAM_RADIUS = 12
+THIRD_PERSON_CAM_POS = [0, 500, 500]
+CONE_LENGTH = 80
+CONE_ANGLE = 30
 
-# ---------------------------
-# Helper math
-# ---------------------------
+       
+MAZE_WALL_THICKNESS = 8
+WALL_THICKNESS = 12
 
-def vec_len(x, y):
-    return math.hypot(x, y)
+                 
+OUTSIDE_SIZE = 600
+HOUSE_POS = (0, 0, 0)
+HOUSE_SIZE = 200
 
+              
+TARGET_FPS = 60
+FRAME_TIME = 1000 // TARGET_FPS                          
+KEY_HOLD_MS = 200                                                          
 
-def clamp(v, a, b):
-    return max(a, min(b, v))
+       
+ENEMY_RADIUS = 15
+ENEMY_HEIGHT = 60
+ENEMY_HP = 3
+ENEMY_DETECTION_RADIUS = 200
+ENEMY_ATTACK_RADIUS = 150
+ENEMY_SPEED = 2.0
+ENEMY_DAMAGE = 10
 
+                           
+            
+                           
+GAME_OUTSIDE = 0
+GAME_INSIDE = 1
+GAME_WIN = 2
+GAME_LOSE = 3
 
-def angle_between(ax, ay, bx, by):
-    a = math.atan2(ay, ax)
-    b = math.atan2(by, bx)
-    diff = (b - a)
-    while diff <= -math.pi:
-        diff += 2 * math.pi
-    while diff > math.pi:
-        diff -= 2 * math.pi
-    return diff
+game_state = GAME_OUTSIDE
+player_pos = [0.0, -OUTSIDE_SIZE + 50, 0.0]
+player_angle = 90.0
+player_hp = PLAYER_MAX_HP
+player_ammo = 30
+player_weapon_damage = 1
+player_fire_rate = 1.0              
 
-def angle_diff(a1, a2):
-    """Return signed angle difference in radians."""
-    diff = a2 - a1
-    while diff > math.pi:
-        diff -= 2 * math.pi
-    while diff <= -math.pi:
-        diff += 2 * math.pi
-    return diff
+camera_pos = [0.0, 0.0, CAMERA_HEIGHT]
+camera_mode = 0                                                                                     
 
-# ============ PART 1: VISION & DETECTION (Stealth Features 1-4) ============
-VISION_CONE_RANGE = 400.0
-VISION_CONE_WIDTH = 80.0  # degrees
-VISION_CONE_FOV = math.radians(VISION_CONE_WIDTH / 2)
+detection_level = 0.0
+detection_meter = 0.0                           
+detected = False                         
+seen_frames = 0                                                                    
+game_won = False
+game_lost = False
+debug_mode = False
 
-DETECTION_INCREASE_RATE = 25.0  # per second when visible
-DETECTION_DECREASE_RATE = 15.0  # per second when hidden
-DETECTION_MAX = 100.0
-DETECTION_ALERT_THRESHOLD = 70.0
-DETECTION_ALARM_THRESHOLD = 85.0
+                          
+current_level = 1              
+exit_door_open = False                                   
 
-LIGHT_TILE_BRIGHTNESS = 1.0
-DARK_TILE_BRIGHTNESS = 0.4
-PLAYER_DARK_DETECTION_MULT = 0.5
-
-# ============ PART 2: GUARD STATES & SOUND (Stealth Features 5-8) ============
-# Use string state names to match AI code elsewhere in the file
-STATE_PATROL = 'patrol'
-STATE_SUSPICIOUS = 'alerted'
-STATE_ALERT = 'chasing'
-STATE_SEARCH = 'searching'
-STATE_RETURN = 'returning'
-
-SOUND_FOOTSTEP_RANGE = 200.0
-SOUND_DOOR_RANGE = 300.0
-SOUND_DISTRACTION_RANGE = 350.0
-SOUND_TAKEDOWN_RANGE = 200.0
-
-DISTRACTION_PROJECTILE_SPEED = 350.0
-DISTRACTION_PROJECTILE_RANGE = 500.0
-
-# ============ PART 3: ALARM & OBJECTIVES (Stealth Features 9-12) ============
-ALARM_LEVEL_0 = 0
-ALARM_LEVEL_1 = 1
-ALARM_LEVEL_2 = 2
-
-ALARM_DECAY_RATE = 20.0
-ALARM_UPGRADE_TO_1 = 50.0
-ALARM_UPGRADE_TO_2 = 80.0
-
-TAKEDOWN_RANGE = 50.0
-TAKEDOWN_ANGLE_THRESHOLD = 100.0
-
-# ---------------------------
-# Level data (3 fixed levels)
-# Each map is a list of strings; characters:
-#  '#': wall
-#  ' ': corridor
-#  'D': door (closed by default)
-#  'K': key
-#  'G': gun powerup
-#  'N': knife powerup
-#  'I': invisibility powerup
-#  'S': player spawn
-#  'E': enemy spawn
-# We also create two layers: layer 0 (ground z=0), layer 1 (upper z= CELL)
-# The same textual maps are used for plan view; for "layers" we'll place some corridors
-# on upper layer by putting uppercase markers 'U' in the same map to indicate an upper corridor tile.
-# For simplicity we hardcode small maps but ensure multiple connected hallways and doors.
-# ---------------------------
-
-LEVELS = []
-
-# Level 1: 5 Linear Corridors separated by pillar fences with doors
-# Format: Corridor (open space) -> Pillar Fence with Door -> Corridor -> ...
-# S = start, E = enemy, D = door in fence, # = pillar fence/wall, G/N/I = powerups
-LEVELS.append({
-    'grid': [
-        "########################",
-        "#      S              #",
-        "#  E        E         #",
-        "#                     #",
-        "#  G             N    #",
-        "########################",
-        "#########D#############",  # Fence with door to Corridor 2
-        "#                     #",
-        "#  E           E      #",
-        "#                     #",
-        "#       G        I    #",
-        "########################",
-        "#########D#############",  # Fence with door to Corridor 3
-        "#                     #",
-        "#    E          E     #",
-        "#                     #",
-        "#   N              G  #",
-        "########################",
-        "#########D#############",  # Fence with door to Corridor 4
-        "#                     #",
-        "#  E               E  #",
-        "#                     #",
-        "#     I            N  #",
-        "########################",
-        "#########D#############",  # Fence with door to Corridor 5
-        "#                     #",
-        "#   E            E    #",
-        "#                     #",
-        "#       G          I  #",
-        "########################",
-    ],
-    'powerups': {'G':5, 'N':5, 'I':5},
-    'enemy_hp': 2,
-    'damage': 1,
-    'enemy_count': 10,
-})
-
-# ---------------------------
-# World state
-# ---------------------------
-current_level_index = 0
-world_map = []  # list of rows (strings)
-map_w = 0
-map_h = 0
-
-# Entities
-player = {
-    'x': 0.0, 'y': 0.0, 'z': 20.0,
-    'angle': 0.0,  # degrees
-    'life': 13,
-    'has_gun': False,
-    'gun_bullets': 0,
-    'has_knife': False,
-    'invisible': False,
-    'invis_timer': 0.0,
-    'melee_timer': 0.0,
-    'melee_interaction_count': 0,
-    'equipped': 'unarmed',
-    # STEALTH FEATURES (Part 1-3)
-    'detection_meter': 0.0,  # How detected is player (0-100)
-    'in_hiding_spot': False,
-    'hacking_terminal': None,
-    'hacking_progress': 0.0,
+                                                                          
+LEVEL_DEFS = {
+    1: {'enemy_count': 3, 'enemy_hp': 3, 'enemy_damage': 10, 'detection_radius': 200},
+    2: {'enemy_count': 4, 'enemy_hp': 4, 'enemy_damage': 12, 'detection_radius': 220},
+    3: {'enemy_count': 5, 'enemy_hp': 5, 'enemy_damage': 15, 'detection_radius': 250},
 }
 
-enemies = []  # Enhanced with state machine, detection, vision cones
+                                                                    
+LEVEL_LAYOUTS = {
+    1: [
+        {'area': (-MAZE_SIZE, -MAZE_SIZE, -MAZE_SIZE//2, MAZE_SIZE//2), 'door': (-MAZE_SIZE//2, -MAZE_SIZE//2)},
+        {'area': (-MAZE_SIZE//2, -MAZE_SIZE, MAZE_SIZE//2, -MAZE_SIZE//2), 'door': (0, -MAZE_SIZE//2)},
+        {'area': (MAZE_SIZE//2, -MAZE_SIZE//2, MAZE_SIZE, MAZE_SIZE//2), 'door': (MAZE_SIZE//2, 0)},
+        {'area': (-MAZE_SIZE//2, MAZE_SIZE//2, MAZE_SIZE//2, MAZE_SIZE), 'door': (0, MAZE_SIZE//2)},
+    ],
+    2: [
+        {'area': (-MAZE_SIZE, -MAZE_SIZE, -MAZE_SIZE//2, MAZE_SIZE//2), 'door': (-MAZE_SIZE//2, -MAZE_SIZE//2)},
+        {'area': (-MAZE_SIZE//2, -MAZE_SIZE, MAZE_SIZE//2, -MAZE_SIZE//2), 'door': (0, -MAZE_SIZE//2)},
+        {'area': (-MAZE_SIZE//2, -MAZE_SIZE//2, MAZE_SIZE//2, MAZE_SIZE//2), 'door': (MAZE_SIZE//2, 0)},
+        {'area': (MAZE_SIZE//2, -MAZE_SIZE//2, MAZE_SIZE, MAZE_SIZE//2), 'door': (MAZE_SIZE//2, MAZE_SIZE//2)},
+    ],
+    3: [
+        {'area': (-MAZE_SIZE, -MAZE_SIZE, -MAZE_SIZE//2, 0), 'door': (-MAZE_SIZE//2, -MAZE_SIZE//2)},
+        {'area': (-MAZE_SIZE//2, -MAZE_SIZE, MAZE_SIZE//2, -MAZE_SIZE//2), 'door': (0, -MAZE_SIZE//2)},
+        {'area': ( -MAZE_SIZE//2, 0, MAZE_SIZE//2, MAZE_SIZE//2), 'door': (0, MAZE_SIZE//2)},
+        {'area': (MAZE_SIZE//2, -MAZE_SIZE//2, MAZE_SIZE, MAZE_SIZE//2), 'door': (MAZE_SIZE//2, 0)},
+    ]
+}
 
-bullets = []  # dicts: x,y,z,vx,vy,owner('player'/'enemy'),life
+                                     
+corridors = []                                   
 
-powerups = []  # dicts: x,y,type,active,timer
+                                                 
+player_weapon_state = 0
+player_powerups = {'knife': False, 'gun': False, 'invisibility': False, 'distraction': False}
+player_gun_ammo = 0
+player_knife_hits = {}
+player_barehands_hits = {}
+invisibility_timer = 0.0
+invisibility_active = False
+distraction = None
+player_collision_damage_cooldown = 0
 
-doors = []  # dicts: x,y,open(0/1),opening_timer,relock_timer
+              
+player_lives = 13
 
-terminals = []  # objectives to hack
+       
+paused = False
 
-hiding_spots = []  # locations where player can hide
+fire_cooldown = 0
+animation_time = 0.0
+player_moved_this_frame = False
+last_update_time = 0
 
-noise_events = []  # sound events that guards react to
+                                             
+bullets = []
 
-keys_collected = 0
-keys_total = 0
+                                                                        
+                          
+enemies = []
 
-# Global stealth state
-global_alarm_level = ALARM_LEVEL_0
-global_alarm_meter = 0.0
-objectives_hacked = 0
-objectives_total = 3
-current_corridor = 0
+                                  
+                                     
+pickups = []
 
-# Game control
-game_state = STATE_PLAY
-camera_mode = CAM_THIRD
-last_time = time.time()
-paused_time_acc = 0.0
+                              
+maze_grid = []
+walls = []
 
-# Camera variables
-cam_third_offset = (0, -320.0, 180.0)
-cam_zoom = 1.0
-camera_pos = (0.0, 500.0, 500.0)
-pcamera_pos = camera_pos
-fovY = 120
-fp = False
-camera_target = (0.0, 0.0, 0.0)
-prefpc = (0.0, 0.0, 0.0)
-prefp = False
-prefpt = (0.0, 0.0, 0.0)
+               
+trees = []
+fence_posts = []
+rocks = []                           
 
-# ---------------------------
-# Map helper functions
-# ---------------------------
+               
+front_door_trigger = None
+exit_door_trigger = None
 
-# ============================================================================
-# STEALTH SYSTEMS (PARTS 1-3)
-# ============================================================================
+                
+keys_pressed = set()
+key_timestamps = {}
 
-# ============ PART 1: VISION CONE & LINE OF SIGHT ============
-def check_guard_vision(guard, player_pos):
-    """Check if guard can see player using vision cone."""
-    dist = vec_len(player_pos[0] - guard['x'], player_pos[1] - guard['y'])
+                          
+inside_static_list = None
+quadric = gluNewQuadric()
+last_game_state = GAME_OUTSIDE                                                        
+
+                           
+                 
+                           
+def generate_maze(width, height):
+    maze = [[True for _ in range(width)] for _ in range(height)]
     
-    if dist > VISION_CONE_RANGE:
-        return False, 0.0
+    start_x, start_y = 1, 1
+    maze[start_y][start_x] = False
     
-    # Angle check
-    dx = player_pos[0] - guard['x']
-    dy = player_pos[1] - guard['y']
-    player_angle_rad = math.atan2(dy, dx)
-    guard_angle_rad = math.radians(guard['angle'])
-    angle_diff_val = angle_diff(guard_angle_rad, player_angle_rad)
+    stack = [(start_x, start_y)]
+    visited = set()
+    visited.add((start_x, start_y))
     
-    if abs(angle_diff_val) > VISION_CONE_FOV:
-        return False, 0.0
+    directions = [(0, 2), (2, 0), (0, -2), (-2, 0)]
     
-    # Visibility fades with distance
-    visibility = 1.0 - (dist / VISION_CONE_RANGE)
-    return True, visibility
-
-# ============ PART 1: PATROL ROUTES ============
-def generate_patrol_waypoints(start_x, start_y, num_points=4):
-    """Generate patrol waypoints around spawn."""
-    waypoints = []
-    base_dist = CELL * 3
-    for i in range(num_points):
-        angle = (i / num_points) * 2 * math.pi
-        px = start_x + math.cos(angle) * base_dist
-        py = start_y + math.sin(angle) * base_dist
-        waypoints.append((px, py))
-    return waypoints
-
-# ============ PART 1: LIGHTING SYSTEM ============
-def get_tile_brightness(x, y):
-    """Return brightness for a world position."""
-    grid_x = int((x / CELL) + map_w // 2)
-    grid_y = int((y / CELL) + map_h // 2)
+    while stack:
+        cx, cy = stack[-1]
+        neighbors = []
+        for dx, dy in directions:
+            nx, ny = cx + dx, cy + dy
+            if 0 < nx < width-1 and 0 < ny < height-1:
+                if (nx, ny) not in visited:
+                    neighbors.append((nx, ny, cx + dx//2, cy + dy//2))
+        
+        if neighbors:
+            nx, ny, mx, my = random.choice(neighbors)
+            maze[my][mx] = False
+            maze[ny][nx] = False
+            visited.add((nx, ny))
+            stack.append((nx, ny))
+        else:
+            stack.pop()
     
-    if grid_x < 0 or grid_y < 0 or grid_x >= map_w or grid_y >= map_h:
-        return LIGHT_TILE_BRIGHTNESS
+    return maze
+
+def widen_maze(maze):
+    height, width = len(maze), len(maze[0])
+    widened = [row[:] for row in maze]
+                                                                                 
+    for y in range(1, height-1):
+        for x in range(1, width-1):
+            if not maze[y][x]:        
+                                                                                 
+                if random.random() < 0.25:
+                    if random.random() < 0.5:
+                        if x+1 < width-1:
+                            widened[y][x+1] = False
+                    else:
+                        if y+1 < height-1:
+                            widened[y+1][x] = False
+
+    return widened
+
+def add_rooms(maze, num_rooms=3):
+    height, width = len(maze), len(maze[0])
+
+    for _ in range(num_rooms):
+        rw, rh = random.randint(3, 5), random.randint(3, 5)
+        rx = random.randint(2, max(2, width - rw - 3))
+        ry = random.randint(2, max(2, height - rh - 3))
+
+        for y in range(ry, min(ry + rh, height-1)):
+            for x in range(rx, min(rx + rw, width-1)):
+                maze[y][x] = False
+
+    return maze
+
+def carve_main_path(maze):
+    height, width = len(maze), len(maze[0])
+    cx = width // 2
+    cy = 1
+    maze[cy][cx] = False
+
+                                                                                 
+    while cy < height - 2:
+                                              
+        r = random.random()
+        if r < 0.65:
+            ny, nx = cy + 1, cx
+        elif r < 0.825:
+            ny, nx = cy, cx + 1
+        else:
+            ny, nx = cy, cx - 1
+
+                            
+        nx = max(1, min(width - 2, nx))
+        ny = max(1, min(height - 2, ny))
+
+        cy, cx = ny, nx
+        maze[cy][cx] = False
+                                                 
+        if cx + 1 < width - 1:
+            maze[cy][cx + 1] = False
+        if cx - 1 > 0:
+            maze[cy][cx - 1] = False
+
+                                         
+    exit_x = width // 2
+    for x in range(exit_x - 1, exit_x + 2):
+        if 0 < x < width - 1:
+            maze[height - 2][x] = False
+
+    return maze
+
+def carve_entrance_room(maze):
+    height, width = len(maze), len(maze[0])
+                                                                                       
+    for y in range(1, min(3, height-1)):
+        for x in range(width//2 - 1, min(width//2 + 2, width-1)):
+            maze[y][x] = False
+    return maze
+
+def expand_paths(maze, pad=1):
+    h, w = len(maze), len(maze[0])
+    out = [row[:] for row in maze]
+    for y in range(h):
+        for x in range(w):
+            if not maze[y][x]:
+                                            
+                for dy in range(-pad, pad+1):
+                    for dx in range(-pad, pad+1):
+                        ny = y + dy
+                        nx = x + dx
+                        if 0 <= ny < h and 0 <= nx < w:
+                            out[ny][nx] = False
+    return out
+
+def maze_to_walls(maze):
+    height, width = len(maze), len(maze[0])
+    offset_x = -MAZE_SIZE
+    offset_y = -MAZE_SIZE
     
-    # Checkerboard pattern
-    if (grid_x + grid_y) % 2 == 0:
-        return LIGHT_TILE_BRIGHTNESS
-    else:
-        return DARK_TILE_BRIGHTNESS
+    edges = []
+    
+    for y in range(height):
+        for x in range(width):
+            if maze[y][x]:             
+                                               
+                if y == 0 or not maze[y-1][x]:
+                    wx1 = offset_x + x * GRID_SIZE
+                    wy = offset_y + y * GRID_SIZE
+                    edges.append((wx1, wy, wx1 + GRID_SIZE, wy, 'H'))
+                
+                if y == height-1 or not maze[y+1][x]:
+                    wx1 = offset_x + x * GRID_SIZE
+                    wy = offset_y + (y+1) * GRID_SIZE
+                    edges.append((wx1, wy, wx1 + GRID_SIZE, wy, 'H'))
+                
+                if x == 0 or not maze[y][x-1]:
+                    wx = offset_x + x * GRID_SIZE
+                    wy1 = offset_y + y * GRID_SIZE
+                    edges.append((wx, wy1, wx, wy1 + GRID_SIZE, 'V'))
+                
+                if x == width-1 or not maze[y][x+1]:
+                    wx = offset_x + (x+1) * GRID_SIZE
+                    wy1 = offset_y + y * GRID_SIZE
+                    edges.append((wx, wy1, wx, wy1 + GRID_SIZE, 'V'))
+    
+                    
+    walls = []
+    h_edges = sorted([e for e in edges if e[4] == 'H'], key=lambda e: (e[1], e[0]))
+    i = 0
+    while i < len(h_edges):
+        x1, y, x2, _, _ = h_edges[i]
+        j = i + 1
+        while j < len(h_edges) and h_edges[j][1] == y and h_edges[j][0] == x2:
+            x2 = h_edges[j][2]
+            j += 1
+        walls.append([x1, y, x2, y, 100])
+        i = j
+    
+    v_edges = sorted([e for e in edges if e[4] == 'V'], key=lambda e: (e[0], e[1]))
+    i = 0
+    while i < len(v_edges):
+        x, y1, _, y2, _ = v_edges[i]
+        j = i + 1
+        while j < len(v_edges) and v_edges[j][0] == x and v_edges[j][1] == y2:
+            y2 = v_edges[j][3]
+            j += 1
+        walls.append([x, y1, x, y2, 100])
+        i = j
+    
+    return walls
 
-# ============ PART 2: SOUND/NOISE SYSTEM ============
-def add_noise_event(x, y, radius, event_type):
-    """Create a noise event."""
-    noise_events.append({
-        'x': x, 'y': y, 'radius': radius,
-        'type': event_type,
-        'time_created': time.time(),
-    })
+def find_path_cells(maze):
+    cells = []
+    height, width = len(maze), len(maze[0])
+    offset_x = -MAZE_SIZE
+    offset_y = -MAZE_SIZE
+    
+    for y in range(height):
+        for x in range(width):
+            if not maze[y][x]:
+                wx = offset_x + x * GRID_SIZE + GRID_SIZE//2
+                wy = offset_y + y * GRID_SIZE + GRID_SIZE//2
+                cells.append((wx, wy))
+    
+    return cells
 
-def guard_hears_noise(guard, noise):
-    """Check if guard hears a noise."""
-    dist = vec_len(noise['x'] - guard['x'], noise['y'] - guard['y'])
-    return dist <= noise['radius']
+                           
+              
+                           
+def distance_2d(x1, y1, x2, y2):
+    return math.sqrt((x2-x1)**2 + (y2-y1)**2)
 
-# ============ PART 2: HIDING SPOTS ============
-def check_near_hiding_spot():
-    """Check if player is near a hiding spot."""
-    for spot in hiding_spots:
-        dist = vec_len(player['x'] - spot['x'], player['y'] - spot['y'])
-        if dist < spot['radius']:
+def get_gun_position(char_x, char_y, char_angle):
+                                                                   
+                                                                
+    gun_offset_x = 16              
+    gun_offset_y = 12                        
+    gun_offset_z = 40                  
+    
+                                            
+    rad = math.radians(char_angle)
+                                                   
+    world_x = char_x + gun_offset_x * math.sin(rad) + gun_offset_y * math.cos(rad)
+    world_y = char_y + gun_offset_x * math.cos(rad) - gun_offset_y * math.sin(rad)
+    world_z = gun_offset_z
+    
+    return [world_x, world_y, world_z]
+
+def normalize_angle(angle):
+    while angle >= 360: angle -= 360
+    while angle < 0: angle += 360
+    return angle
+
+def check_wall_collision(x, y, radius):
+    if game_state == GAME_OUTSIDE:
+                            
+        if abs(x) > OUTSIDE_SIZE - radius or abs(y) > OUTSIDE_SIZE - radius:
+            return True
+        
+                                        
+        hx, hy, hz = HOUSE_POS
+        if abs(x - hx) < HOUSE_SIZE//2 + radius and abs(y - hy) < HOUSE_SIZE//2 + radius:
+                              
+            door_x, door_y = hx, hy - HOUSE_SIZE//2
+            if abs(x - door_x) < 55 and abs(y - door_y) < 60:
+                return False                  
+            return True
+        
+        return False
+    
+    elif game_state == GAME_INSIDE:
+                    
+        for wall in walls:
+            x1, y1, x2, y2, h = wall
+            if point_to_segment_distance(x, y, x1, y1, x2, y2) < radius:
+                return True
+        
+                  
+        if abs(x) > MAZE_SIZE - radius or abs(y) > MAZE_SIZE - radius:
+            return True
+        
+        return False
+    
+    return False
+
+def point_to_segment_distance(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    if abs(dx) < 0.001 and abs(dy) < 0.001:
+        return distance_2d(px, py, x1, y1)
+    
+    t = max(0, min(1, ((px-x1)*dx + (py-y1)*dy) / (dx*dx + dy*dy)))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return distance_2d(px, py, proj_x, proj_y)
+
+def line_intersects_wall(x1, y1, x2, y2):
+    if game_state != GAME_INSIDE:
+        return False
+    
+    for wall in walls:
+        wx1, wy1, wx2, wy2, _ = wall
+        if segments_intersect(x1, y1, x2, y2, wx1, wy1, wx2, wy2):
             return True
     return False
 
-# ============ PART 3: TAKEDOWN ============
-def attempt_takedown(guard):
-    """Attempt to takedown a guard."""
-    dist = vec_len(player['x'] - guard['x'], player['y'] - guard['y'])
-    if dist > TAKEDOWN_RANGE:
+def segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
+    denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
+    if abs(denom) < 0.001:
         return False
     
-    # Check angle
-    dx = guard['x'] - player['x']
-    dy = guard['y'] - player['y']
-    target_angle = math.atan2(dy, dx)
-    player_angle_rad = math.radians(player['angle'])
-    angle_diff_val = abs(angle_diff(player_angle_rad, target_angle))
+    t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
+    u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom
     
-    if angle_diff_val > math.radians(TAKEDOWN_ANGLE_THRESHOLD):
-        return False
-    
-    # Disable guard
-    guard['hp'] = 0
-    guard['state'] = STATE_PATROL
-    add_noise_event(guard['x'], guard['y'], SOUND_TAKEDOWN_RANGE, 'takedown')
+    return (0 <= t <= 1) and (0 <= u <= 1)
+
+def camera_has_clearance(cx, cy, walls, clearance):
+    for wall in walls:
+        x1, y1, x2, y2, h = wall
+        dist = point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+        if dist < clearance:
+            return False
     return True
 
-# ============ PART 2: DISTRACTION TOOL ============
-def throw_distraction():
-    """Throw a distraction object."""
-    angle = math.radians(player['angle'])
-    dist = DISTRACTION_PROJECTILE_RANGE * 0.8
-    land_x = player['x'] + math.cos(angle) * dist
-    land_y = player['y'] + math.sin(angle) * dist
-    add_noise_event(land_x, land_y, SOUND_DISTRACTION_RANGE, 'distraction')
+                           
+                     
+                           
+def init_outside():
+    global trees, fence_posts, front_door_trigger, player_pos, player_angle
+    
+    player_pos = [0.0, -OUTSIDE_SIZE + 80, 0.0]
+    player_angle = 90.0
+    
+                  
+    trees = []
+    for _ in range(20):                     
+        tx = random.uniform(-OUTSIDE_SIZE + 100, OUTSIDE_SIZE - 100)
+        ty = random.uniform(-OUTSIDE_SIZE + 100, OUTSIDE_SIZE - 100)
+        
+                          
+        hx, hy, _ = HOUSE_POS
+        if abs(tx - hx) > HOUSE_SIZE and abs(ty - hy) > HOUSE_SIZE:
+            trees.append([tx, ty, random.uniform(0.8, 1.3)])
+    
+                                  
+    fence_posts = []
+    spacing = 80
+    for i in range(-OUTSIDE_SIZE, OUTSIDE_SIZE, spacing):
+        fence_posts.append([i, -OUTSIDE_SIZE, 1.0])
+        fence_posts.append([i, OUTSIDE_SIZE, 1.0])
+        fence_posts.append([-OUTSIDE_SIZE, i, 1.0])
+        fence_posts.append([OUTSIDE_SIZE, i, 1.0])
+    
+                        
+    hx, hy, _ = HOUSE_POS
+    front_door_trigger = [hx, hy - HOUSE_SIZE//2, 70]
+    
+                    
+    global rocks
+    rocks = []
+    for _ in range(8):
+        rx = random.uniform(-OUTSIDE_SIZE + 150, OUTSIDE_SIZE - 150)
+        ry = random.uniform(-OUTSIDE_SIZE + 150, OUTSIDE_SIZE - 150)
+                               
+        if abs(rx - hx) > HOUSE_SIZE and abs(ry - hy) > HOUSE_SIZE:
+            if ry > -OUTSIDE_SIZE + 200:                          
+                size = random.uniform(8, 18)
+                rocks.append([rx, ry, size])
 
-# ============ PART 3: ALARM LEVEL SYSTEM ============
-def update_global_alarm_level():
-    """Update global alarm based on player detection."""
-    global global_alarm_level, global_alarm_meter
+def init_inside():
+    global maze_grid, walls, enemies, pickups, exit_door_trigger, player_pos, player_angle, inside_static_list, exit_door_open
     
-    max_detection = player['detection_meter']
-    for enemy in enemies:
-        max_detection = max(max_detection, enemy.get('detection_meter', 0.0))
+                                                                                     
+    maze_grid = generate_maze(GRID_TILES, GRID_TILES)
+    maze_grid = carve_main_path(maze_grid)                                    
+    maze_grid = carve_entrance_room(maze_grid)                 
+                                                                       
+    maze_grid = widen_maze(maze_grid)
     
-    global_alarm_meter = max_detection
+    walls = maze_to_walls(maze_grid)
     
-    if global_alarm_meter >= ALARM_UPGRADE_TO_2:
-        global_alarm_level = ALARM_LEVEL_2
-    elif global_alarm_meter >= ALARM_UPGRADE_TO_1:
-        global_alarm_level = ALARM_LEVEL_1
+                        
+    walls.extend([
+        [-MAZE_SIZE, -MAZE_SIZE, MAZE_SIZE, -MAZE_SIZE, 100],
+        [MAZE_SIZE, -MAZE_SIZE, MAZE_SIZE, MAZE_SIZE, 100],
+        [MAZE_SIZE, MAZE_SIZE, -MAZE_SIZE, MAZE_SIZE, 100],
+        [-MAZE_SIZE, MAZE_SIZE, -MAZE_SIZE, -MAZE_SIZE, 100],
+    ])
+    
+    path_cells = find_path_cells(maze_grid)
+    if not path_cells:
+        path_cells = [(0, 0)]
+    
+                                
+    spawn_cells = [c for c in path_cells if c[1] < -MAZE_SIZE + 200]
+    if spawn_cells:
+        player_pos = [float(spawn_cells[0][0]), float(spawn_cells[0][1]), 0.0]
     else:
-        global_alarm_level = ALARM_LEVEL_0
+        player_pos = [float(path_cells[0][0]), float(path_cells[0][1]), 0.0]
     
-    # Decay when hiding
-    if player['in_hiding_spot']:
-        global_alarm_meter = max(0.0, global_alarm_meter - ALARM_DECAY_RATE * 0.016)
-
-# ============ PART 3: OBJECTIVE HACKING ============
-def hack_terminal(terminal, dt):
-    """Progress hacking."""
-    required_time = 5.0
-    player['hacking_progress'] += dt
-    if player['hacking_progress'] >= required_time:
-        global objectives_hacked
-        objectives_hacked += 1
-        player['hacking_progress'] = 0.0
-        player['hacking_terminal'] = None
-        return True
-    return False
-
-# ============ PART 2: UPDATE GUARD STATE ============
-def update_guard_state(guard, dt):
-    """Update guard state machine."""
-    detection = guard.get('detection_meter', 0.0)
-    current_state = guard['state']
+    player_angle = 90.0
     
-    # Check if can see player
-    can_see, visibility = check_guard_vision(guard, (player['x'], player['y']))
-    
-    # Update detection
-    if can_see:
-        brightness = get_tile_brightness(guard['x'], guard['y'])
-        rate = DETECTION_INCREASE_RATE * visibility * brightness
-        guard['detection_meter'] = min(DETECTION_MAX, guard['detection_meter'] + rate * dt)
-    else:
-        guard['detection_meter'] = max(0.0, guard['detection_meter'] - DETECTION_DECREASE_RATE * dt)
-
-    # use updated detection value for transitions
-    detection = guard.get('detection_meter', 0.0)
-
-    # State transitions
-    if detection >= DETECTION_ALARM_THRESHOLD:
-        guard['state'] = STATE_ALERT
-    elif detection >= DETECTION_ALERT_THRESHOLD:
-        guard['state'] = STATE_SUSPICIOUS
-    elif current_state in [STATE_SUSPICIOUS, STATE_ALERT, STATE_SEARCH] and detection < 30.0:
-        guard['state'] = STATE_PATROL
-
-# ---------------------------
-def load_level(idx):
-    """Load level: simple linear corridors with pillar fences and doors."""
-    global world_map, map_w, map_h, enemies, powerups, doors, player, terminals, hiding_spots, noise_events, bullets, current_corridor
-    
-    level = LEVELS[idx % len(LEVELS)]
-    world_map = [row for row in level['grid']]
-    map_h = len(world_map)
-    map_w = max(len(row) for row in world_map)
-    
-    # Reset all entities
+                                          
     enemies = []
-    powerups = []
-    doors = []
-    terminals = []
-    hiding_spots = []
-    noise_events = []
+    level_def = LEVEL_DEFS.get(current_level, LEVEL_DEFS[1])
+    enemy_count = level_def['enemy_count']
+    enemy_hp = level_def['enemy_hp']
+    
+    far_cells = [c for c in path_cells if distance_2d(c[0], c[1], player_pos[0], player_pos[1]) > 250]
+    
+    if far_cells:
+        for _ in range(min(enemy_count, len(far_cells))):
+            ex, ey = random.choice(far_cells)
+            far_cells.remove((ex, ey))
+            enemies.append({'x': ex, 'y': ey, 'hp': enemy_hp, 'alive': True,
+                            'angle': random.uniform(0, 360), 'state': 0,
+                            'target_x': ex, 'target_y': ey, 'attack_cd': 0,
+                            'rot_dir': 1, 'alerted': False, 'alert_timer': 0.0,
+                            'corridor': None})
+    
+    pickups = []
+    powerup_types = ['knife', 'gun', 'invisibility', 'distraction']
+    far_pickup_cells = [c for c in path_cells if distance_2d(c[0], c[1], player_pos[0], player_pos[1]) > 150]
+    
+    if len(far_pickup_cells) >= 4:
+        pickup_cells = random.sample(far_pickup_cells, 4)
+        for i, (px, py) in enumerate(pickup_cells):
+            pickups.append([px, py, powerup_types[i], False])
+    
+    exit_cells = [c for c in path_cells if c[1] > MAZE_SIZE - 200]
+    if exit_cells:
+        ex, ey = random.choice(exit_cells)
+        exit_door_trigger = [ex, ey, 50]
+    else:
+        exit_door_trigger = [path_cells[-1][0], path_cells[-1][1], 50]
+                                               
+    exit_door_open = False
+    
+                                                                                   
+                                                                           
+    inside_static_list = None
+
+def reset_game():
+    global game_state, player_hp, player_ammo, player_weapon_damage, player_fire_rate
+    global detection_level, detection_meter, detected, game_won, game_lost, bullets, fire_cooldown, animation_time
+    global camera_pos, current_level, exit_door_open, camera_mode
+    global player_weapon_state, player_powerups, player_gun_ammo, player_lives
+    global invisibility_timer, invisibility_active, distraction
+    global player_knife_hits, player_barehands_hits, player_collision_damage_cooldown
+    
+    game_state = GAME_OUTSIDE
+    player_hp = PLAYER_MAX_HP
+    player_ammo = 30
+    player_weapon_damage = 1
+    player_fire_rate = 1.0
+    camera_mode = 0
+    detection_level = 0.0
+    detection_meter = 0.0
+    detected = False
+    seen_frames = 0
+    game_won = False
+    game_lost = False
     bullets = []
-    current_corridor = 0
+    fire_cooldown = 0
+    animation_time = 0.0
+    current_level = 1
+    exit_door_open = False
     
-    # Spawn entities from map
-    for y, row in enumerate(world_map):
-        for x, ch in enumerate(row):
-            wx = (x - map_w // 2) * CELL
-            wy = (y - map_h // 2) * CELL
+    player_weapon_state = 0
+    player_powerups = {'knife': False, 'gun': False, 'invisibility': False, 'distraction': False}
+    player_gun_ammo = 0
+    player_lives = 13
+    invisibility_timer = 0.0
+    invisibility_active = False
+    distraction = None
+    player_knife_hits = {}
+    player_barehands_hits = {}
+    player_collision_damage_cooldown = 0
+    
+    init_outside()
+    camera_pos = [THIRD_PERSON_CAM_POS[0], THIRD_PERSON_CAM_POS[1], THIRD_PERSON_CAM_POS[2]]
+
+                           
             
-            if ch == 'S':  # Player start
-                player['x'] = wx
-                player['y'] = wy
-                player['z'] = 20.0
-                player['angle'] = 0.0
-                player['life'] = 13
-                player['has_gun'] = False
-                player['gun_bullets'] = 0
-                player['has_knife'] = False
-                player['invisible'] = False
-                player['invis_timer'] = 0.0
-                player['melee_timer'] = 0.0
-                player['detection_meter'] = 0.0
-                player['in_hiding_spot'] = False
-                player['hacking_terminal'] = None
-                player['hacking_progress'] = 0.0
-                
-            elif ch == 'E':  # Enemy
-                enemies.append({
-                    'x': wx, 'y': wy, 'z': 20.0,
-                    'angle': 0.0,
-                    'state': 'patrol',
-                    'patrol': [(wx, wy), (wx+CELL*2, wy)],
-                    'pi': 0,
-                    'hp': level['enemy_hp'],
-                    'last_seen': None,
-                    'alerted_since': None,
-                    'shoot_cooldown': 0.0,
-                    'detection_meter': 0.0,
-                    'corridor': y // 6,  # Assign to corridor
-                })
-                
-            elif ch == 'D':  # Door
-                doors.append({
-                    'x': wx,
-                    'y': wy,
-                    'z': 0,
-                    'open': False,
-                    'opening_timer': 0.0,
-                    'relock_timer': 0.0,
-                    'corridor': y // 6,  # Door opens when corridor enemies defeated
-                })
-                
-            elif ch in ('G', 'N', 'I'):  # Powerups
-                powerups.append({
-                    'x': wx,
-                    'y': wy,
-                    'z': 20,
-                    'type': ch,
-                    'active': True,
-                    'timer': 0.0,
-                })
+                           
+def update_player():
+    global player_hp, game_state, game_lost, last_game_state, current_level, exit_door_open
     
-    # Create some hiding spots in corridors (empty spaces)
-    hiding_spots = []
-    for _ in range(4):
-        found = False
-        for _ in range(100):
-            y = random.randint(0, map_h - 1)
-            x = random.randint(0, map_w - 1)
-            if x < len(world_map[y]) and world_map[y][x] == ' ':
-                wx = (x - map_w // 2) * CELL
-                wy = (y - map_h // 2) * CELL
-                hiding_spots.append({'x': wx, 'y': wy, 'radius': CELL * 0.6})
-                found = True
-                break
-        if not found:
-            break
-
-    player['melee_timer'] = 0.0
-
-
-def find_empty_cell():
-    for _ in range(2000):
-        x = random.randint(1, map_w-2)
-        y = random.randint(1, map_h-2)
-        if world_map[y][x] == ' ':
-            wx = (x - map_w // 2) * CELL
-            wy = (y - map_h // 2) * CELL
-            return wx, wy
-    return 0,0
-
-
-def build_patrol_for(wx, wy):
-    # simple short patrol: two points (spawn and a nearby free cell)
-    pts = [(wx, wy)]
-    for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
-        nx = wx + dx*CELL*2
-        ny = wy + dy*CELL*2
-        if not cell_is_wall_world(nx, ny):
-            pts.append((nx, ny))
-            break
-    if len(pts) == 1:
-        pts.append((wx+CELL*2, wy))
-    return pts
+                         
+    if game_state == GAME_OUTSIDE and front_door_trigger:
+        dx, dy, radius = front_door_trigger
+        if distance_2d(player_pos[0], player_pos[1], dx, dy) < radius:
+                         
+            last_game_state = game_state
+            game_state = GAME_INSIDE
+            init_inside()
+            return
+    
+    elif game_state == GAME_INSIDE and exit_door_trigger:
+        ex, ey, radius = exit_door_trigger
+        if distance_2d(player_pos[0], player_pos[1], ex, ey) < radius:
+                                                                       
+            if exit_door_open:
+                                               
+                if current_level < 3:
+                    current_level += 1
+                    init_inside()
+                else:
+                                                  
+                    last_game_state = game_state
+                    game_state = GAME_WIN
+            return
+    
+                 
+    if player_hp <= 0:
+        last_game_state = game_state
+        game_state = GAME_LOSE
 
 
-def world_to_cell(wx, wy):
-    cx = int(round(wx / CELL)) + map_w // 2
-    cy = int(round(wy / CELL)) + map_h // 2
-    return cx, cy
-
-
-def cell_is_wall_cell(cx, cy):
-    if cx < 0 or cy < 0 or cy >= map_h or cx >= map_w:
-        return True
-    if cx >= len(world_map[cy]):
-        return True
-    return world_map[cy][cx] == '#'
-
-
-def cell_is_wall_world(wx, wy):
-    cx, cy = world_to_cell(wx, wy)
-    return cell_is_wall_cell(cx, cy)
-
-
-def door_at_world(wx, wy):
-    for d in doors:
-        if abs(d['x'] - wx) < (CELL/2) and abs(d['y'] - wy) < (CELL/2):
-            return d
-    return None
-
-
-def try_open_door_at(tx, ty, opener=None):
-    """Try to open a door at world coordinates (tx,ty).
-    Returns True if a door was found and opening was initiated or already open.
-    """
-    d = door_at_world(tx, ty)
-    if not d:
-        # snap to nearest cell center and try again
-        cx, cy = world_to_cell(tx, ty)
-        wx = (cx - map_w//2) * CELL
-        wy = (cy - map_h//2) * CELL
-        d = door_at_world(wx, wy)
-        if not d:
-            return False
-    # if already open, nothing to do
-    if d.get('open'):
-        return True
-    # start opening timer; update will flip to open when timer elapses
-    d['opening_timer'] = DOOR_OPEN_TIME
-    return True
-
-# ---------------------------
-# Collision
-# ---------------------------
-
-def collides_with_walls(x, y, radius=PLAYER_SIZE):
-    # check the 4 neighboring cells
-    cx, cy = world_to_cell(x, y)
-    for dy in range(-1,2):
-        for dx in range(-1,2):
-            tx = cx + dx
-            ty = cy + dy
-            if cell_is_wall_cell(tx, ty):
-                wx = (tx - map_w//2)*CELL
-                wy = (ty - map_h//2)*CELL
-                # treat wall cell as square of size CELL
-                # check circle vs AABB
-                nearest_x = clamp(x, wx - CELL/2, wx + CELL/2)
-                nearest_y = clamp(y, wy - CELL/2, wy + CELL/2)
-                if vec_len(nearest_x - x, nearest_y - y) < radius:
-                    return True
-    # doors as blocking when closed
-    for d in doors:
-        if not d['open']:
-            if abs(d['x']-x) < CELL/2 and abs(d['y']-y) < CELL/2:
-                return True
-    return False
-
-# ---------------------------
-# LOS and vision cone
-# ---------------------------
-
-def line_of_sight(x1, y1, x2, y2):
-    # step along the segment and check walls
-    dx = x2 - x1
-    dy = y2 - y1
-    dist = math.hypot(dx, dy)
-    steps = int(max(8, dist / (CELL * 0.25)))
-    for i in range(1, steps+1):
-        t = i / steps
-        sx = x1 + dx * t
-        sy = y1 + dy * t
-        if cell_is_wall_world(sx, sy):
-            return False
-        # closed doors block
-        d = door_at_world(sx, sy)
-        if d and not d['open']:
-            return False
-    return True
-
-
-def in_vision_cone(ex, ey, eang_deg, fov_deg, max_dist, tx, ty):
-    # ensure cone rotates with enemy (we only call with enemy's angle)
-    dx = tx - ex
-    dy = ty - ey
-    d = math.hypot(dx, dy)
-    if d > max_dist:
-        return False
-    # enemy forward vector (must match the forward direction used in rendering)
-    rad = math.radians(eang_deg)
-    fx = -math.sin(rad)  # Fixed to match rendering
-    fy = math.cos(rad)   # Fixed to match rendering
-    # angle between forward and target vector
-    ang = math.degrees(abs(angle_between(fx, fy, dx/d if d>0 else 0, dy/d if d>0 else 0)))
-    return ang <= (fov_deg/2)
-
-# ---------------------------
-# AI helpers
-# ---------------------------
-
-def nearby_enemies(center_x, center_y, radius=300):
-    return [e for e in enemies if vec_len(e['x']-center_x, e['y']-center_y) <= radius]
-
-
-# Enemy movement helper: attempt to move an enemy, open doors if needed
-def try_enemy_move(e, dx, dy):
-    tx = e['x'] + dx
-    ty = e['y'] + dy
-    d = door_at_world(tx, ty)
-    if d and not d['open']:
-        # start opening door (enemy can open it)
-        d['opening_timer'] = DOOR_OPEN_TIME
-        return False
-    if not collides_with_walls(tx, ty):
-        e['x'] = tx
-        e['y'] = ty
-        return True
-    return False
-
-# ---------------------------
-# Game update
-# ---------------------------
-
-def update(dt):
-    global bullets, game_state, current_level_index, keys_collected, player
-    # Check if player died
-    if player['life'] <= 0:
-        game_state = STATE_GAMEOVER
-        return
-    if game_state != STATE_PLAY:
-        return
-    # update player invis timer
-    if player['invisible']:
-        player['invis_timer'] -= dt
-        if player['invis_timer'] <= 0:
-            player['invisible'] = False
-            player['invis_timer'] = 0.0
-
-    # update doors
-    for d in doors:
-        if d['open'] is False and d['opening_timer'] > 0:
-            d['opening_timer'] -= dt
-            if d['opening_timer'] <= 0:
-                d['open'] = True
-                d['relock_timer'] = DOOR_RELOCK_TIME
-        if d['open'] and d['relock_timer'] > 0:
-            d['relock_timer'] -= dt
-            if d['relock_timer'] <= 0:
-                d['open'] = False
-                d['relock_timer'] = 0.0
-
-    # update bullets
+def update_bullets():
+    global bullets, enemies, player_lives, game_state, last_game_state
     kept = []
-    for b in bullets:
-        b['x'] += b['vx'] * dt
-        b['y'] += b['vy'] * dt
-        b['life'] -= dt
-        if b['life'] <= 0:
+    for bullet in bullets:
+        bx, by, bz, vx, vy, vz, frames = bullet
+
+        bx += vx
+        by += vy
+        bz += vz
+        frames -= 1
+
+        if frames <= 0 or bz < 0:
             continue
-        # collide with walls
-        if cell_is_wall_world(b['x'], b['y']):
+
+                        
+        if check_wall_collision(bx, by, 5):
             continue
-        # collide with doors
-        d = door_at_world(b['x'], b['y'])
-        if d and not d['open']:
-            continue
-        if b['owner'] == 'player':
-            # hit enemy?
-            for e in enemies:
-                if vec_len(e['x']-b['x'], e['y']-b['y']) < PLAYER_SIZE:
-                    # gun kills immediately (per rules: gun kills in 1 shot)
-                    e['hp'] = 0
-                    b['life'] = 0
-                    break
-        else:
-            if vec_len(player['x']-b['x'], player['y']-b['y']) < PLAYER_SIZE:
-                # hit player
-                player['life'] -= LEVELS[current_level_index]['damage']
-                b['life'] = 0
-                if player['life'] <= 0:
-                    game_state = STATE_GAMEOVER
-        if b['life'] > 0:
-            kept.append(b)
+
+        # Check if bullet hits player
+        if game_state == GAME_INSIDE:
+            player_dist = distance_2d(bx, by, player_pos[0], player_pos[1])
+            if player_dist < 15:
+                player_lives -= 1
+                if player_lives <= 0:
+                    last_game_state = game_state
+                    game_state = GAME_LOSE
+                continue
+
+                                       
+        hit = False
+        if game_state == GAME_INSIDE:
+            for enemy in enemies:
+                                                                              
+                try:
+                    if isinstance(enemy, dict):
+                        ex = enemy.get('x')
+                        ey = enemy.get('y')
+                        if ex is None or ey is None:
+                            continue
+                        if distance_2d(bx, by, ex, ey) < ENEMY_RADIUS + 4:
+                                          
+                            if 'hp' in enemy:
+                                enemy['hp'] -= 1
+                                if enemy['hp'] <= 0:
+                                    enemy['alive'] = False
+                            else:
+                                enemy['alive'] = False
+                            hit = True
+                            break
+                    else:
+                        ex, ey = enemy[0], enemy[1]
+                        if distance_2d(bx, by, ex, ey) < ENEMY_RADIUS + 4:
+                            enemy[2] -= 1
+                            if enemy[2] <= 0:
+                                enemy[2] = 0
+                            hit = True
+                            break
+                except Exception:
+                    continue
+
+        if not hit:
+            kept.append([bx, by, bz, vx, vy, vz, frames])
+
     bullets = kept
 
-    # process noise events (guards investigate sounds)
-    nowt = time.time()
-    kept_noises = []
-    for n in noise_events:
-        age = nowt - n.get('time_created', nowt)
-        # expire noises after a few seconds
-        if age > 6.0:
-            continue
-        # alert nearby guards
-        for e in enemies:
-            if e['hp'] <= 0:
-                continue
-            if guard_hears_noise(e, n):
-                # if not already in a high-alert state, investigate
-                if e['state'] not in (STATE_ALERT, STATE_SUSPICIOUS, 'chasing'):
-                    e['state'] = STATE_SUSPICIOUS
-                    e['last_seen'] = (n['x'], n['y'])
-                    e['alerted_since'] = nowt
-        kept_noises.append(n)
-    noise_events[:] = kept_noises
-
-    # update enemies
-    # Update player's detection meter based on guards' vision
-    seen_by_any = False
-    for e in enemies:
-        if e.get('hp', 0) <= 0:
-            continue
-        can_see, vis = check_guard_vision(e, (player['x'], player['y']))
-        if can_see and line_of_sight(e['x'], e['y'], player['x'], player['y']) and not player.get('invisible', False):
-            seen_by_any = True
-            # brightness at player influences detectability
-            brightness = get_tile_brightness(player['x'], player['y'])
-            dark_mult = PLAYER_DARK_DETECTION_MULT if brightness < 1.0 else 1.0
-            rate = DETECTION_INCREASE_RATE * vis * brightness * dark_mult
-            player['detection_meter'] = min(DETECTION_MAX, player.get('detection_meter', 0.0) + rate * dt)
-        # small per-enemy detection influence when not seen is handled below
-    if not seen_by_any:
-        player['detection_meter'] = max(0.0, player.get('detection_meter', 0.0) - DETECTION_DECREASE_RATE * dt)
-    # enforce alert limits: at most MAX_ALERTED_NEARBY near events
-    for e in enemies:
-        if e['hp'] <= 0:
-            continue
-        # cooldowns
-        if e['shoot_cooldown'] > 0:
-            e['shoot_cooldown'] -= dt
-        # simple state machine
-        if e['state'] == 'patrol':
-            # move toward current patrol point
-            tx, ty = e['patrol'][e['pi']]
-            vx = tx - e['x']
-            vy = ty - e['y']
-            dist = math.hypot(vx, vy)
-            if dist < 6:
-                e['pi'] = (e['pi'] + 1) % len(e['patrol'])
-            else:
-                nx = (vx / dist) * ENEMY_SPEED * dt
-                ny = (vy / dist) * ENEMY_SPEED * dt
-                # try move, avoid walls or open doors
-                try_enemy_move(e, nx, ny)
-            # rotate slowly toward next
-            desired = math.degrees(math.atan2(ty-e['y'], tx-e['x']))
-            diff = (desired - e['angle'] + 180) % 360 - 180
-            e['angle'] += clamp(diff, -60*dt, 60*dt)
-            # check vision cone
-            if detect_player_by_enemy(e):
-                e['state'] = 'chasing'
-                e['last_seen'] = (player['x'], player['y'])
-                e['alerted_since'] = time.time()
-                # alert up to one/two nearby
-                count = 0
-                for other in nearby_enemies(e['x'], e['y'], radius= CELL*3 ):
-                    if other is e: continue
-                    if count >= (MAX_ALERTED_NEARBY-1): break
-                    # only if in same hallway approx (no walls between)
-                    if line_of_sight(e['x'], e['y'], other['x'], other['y']):
-                        other['state'] = 'alerted'
-                        other['alerted_since'] = time.time()
-                        count += 1
-        elif e['state'] == 'alerted':
-            # look toward player's last known position briefly, then search
-            if detect_player_by_enemy(e):
-                e['state'] = 'chasing'
-                e['last_seen'] = (player['x'], player['y'])
-            else:
-                # search behavior: walk toward last seen if exists
-                if e['last_seen']:
-                    tx, ty = e['last_seen']
-                    vx = tx - e['x']
-                    vy = ty - e['y']
-                    dist = math.hypot(vx, vy)
-                    if dist > 6:
-                        nx = (vx / dist) * ENEMY_SPEED * dt
-                        ny = (vy / dist) * ENEMY_SPEED * dt
-                        try_enemy_move(e, nx, ny)
-                    else:
-                        # if reached last seen, switch to searching
-                        e['state'] = 'searching'
-                        e['search_timer'] = 3.0
-                else:
-                    e['state'] = 'patrol'
-        elif e['state'] == 'chasing':
-            # move faster toward player
-            tx = player['x']
-            ty = player['y']
-            vx = tx - e['x']
-            vy = ty - e['y']
-            dist = math.hypot(vx, vy)
-            if dist > 4:
-                nx = (vx / dist) * ENEMY_CHASE_SPEED * dt
-                ny = (vy / dist) * ENEMY_CHASE_SPEED * dt
-                try_enemy_move(e, nx, ny)
-            # rotate to face player
-            desired = math.degrees(math.atan2(ty-e['y'], tx-e['x']))
-            diff = (desired - e['angle'] + 180) % 360 - 180
-            e['angle'] += clamp(diff, -360*dt, 360*dt)
-            # shoot if player visible and cooldown done
-            if detect_player_by_enemy(e):
-                if e['shoot_cooldown'] <= 0.0 and not player['invisible']:
-                    # enemy fires one bullet from gun hand position
-                    rad = math.radians(e['angle'])
-                    fx = -math.sin(rad)
-                    fy = math.cos(rad)
-                    rx = math.cos(rad)
-                    ry = math.sin(rad)
-                    gun_x = e['x'] + fx * 8 + rx * 6  # gun hand position
-                    gun_y = e['y'] + fy * 8 + ry * 6
-                    fire_bullet(gun_x, gun_y, e['angle'], 'enemy')
-                    e['shoot_cooldown'] = 1.0  # Shoot every 1 second continuously
-                e['last_seen'] = (player['x'], player['y'])
-            else:
-                # lost sight
-                if e['last_seen']:
-                    e['state'] = 'searching'
-                    e['search_timer'] = 4.0
-                else:
-                    e['state'] = 'returning'
-        elif e['state'] == 'searching':
-            # roam around last seen spot
-            e['search_timer'] -= dt
-            if detect_player_by_enemy(e):
-                e['state'] = 'chasing'
-            elif e['search_timer'] <= 0:
-                e['state'] = 'returning'
-        elif e['state'] == 'returning':
-            # go back to patrol start
-            tx, ty = e['patrol'][0]
-            vx = tx - e['x']
-            vy = ty - e['y']
-            dist = math.hypot(vx, vy)
-            if dist > 6:
-                nx = (vx / dist) * ENEMY_SPEED * dt
-                ny = (vy / dist) * ENEMY_SPEED * dt
-                try_enemy_move(e, nx, ny)
-            else:
-                e['state'] = 'patrol'
-
-    # remove dead enemies, drop keys
-    for e in list(enemies):
-        if e['hp'] <= 0:
-            enemies.remove(e)
-
-    # Automatic hand-collision melee: if player is close to an enemy, apply melee damage without pressing F
-    if player.get('melee_timer', 0) > 0:
-        player['melee_timer'] -= dt
-    for e in enemies:
-        if e['hp'] <= 0:
-            continue
-        d = vec_len(e['x'] - player['x'], e['y'] - player['y'])
-        if d < MELEE_RANGE:
-            if player.get('melee_timer', 0) <= 0:
-                if player.get('has_knife'):
-                    e['hp'] -= KNIFE_DAMAGE
-                    player['melee_timer'] = MELEE_COOLDOWN_KNIFE
-                    e['state'] = 'chasing'
-                elif player.get('has_gun'):
-                    # gun does not melee damage
-                    pass
-                else:
-                    e['hp'] -= UNARMED_DAMAGE
-                    player['melee_timer'] = MELEE_COOLDOWN_UNARMED
-                    e['state'] = 'chasing'
-
-    # pickups
-    for pu in powerups:
-        if not pu['active']:
-            continue
-        if vec_len(pu['x']-player['x'], pu['y']-player['y']) < CELL*0.6:
-            take_powerup(pu)
-
-    # check for keys
-    for pu in powerups:
-        if pu['active'] and pu['type'] == 'K' and vec_len(pu['x']-player['x'], pu['y']-player['y']) < CELL*0.6:
-            pu['active'] = False
-            keys_collected += 1
-
-    # Layer transition: if a separator door is open and player is very near, move player to the adjacent layer side
-    for d in doors:
-        if d.get('layer_from') is not None and d.get('open'):
-            if vec_len(player['x'] - d['x'], player['y'] - d['y']) < CELL * 0.8:
-                # move player across the door to the next layer
-                # if player is above (smaller y), move to below side, else move above
-                if player['y'] < d['y']:
-                    player['y'] = d['y'] + CELL * 0.7
-                else:
-                    player['y'] = d['y'] - CELL * 0.7
-                # small nudge to avoid re-triggering
-                player['x'] = d['x']
-
-    # Check if all enemies in current corridor are dead - if so, open the door to next corridor
-    enemies_in_corridor = [e for e in enemies if e.get('corridor', 0) == current_corridor and e['hp'] > 0]
-    if not enemies_in_corridor:
-        # All enemies in current corridor defeated
-        for d in doors:
-            if d.get('corridor', 0) == current_corridor and not d['open']:
-                d['open'] = True
-                d['opening_timer'] = 0.0
-                d['relock_timer'] = 9999
+def update_pickups():
+    global player_gun_ammo, player_powerups, invisibility_timer, invisibility_active
     
-    # Check if player reached the last door (level complete)
-    all_enemies_dead = all(e['hp'] <= 0 for e in enemies)
-    if all_enemies_dead:
-        # All enemies defeated - player can exit through last door
-        for d in doors:
-            d['open'] = True
-            d['opening_timer'] = 0.0
-            d['relock_timer'] = 9999
-        # If player is near a door, advance to next level
-        for d in doors:
-            if d['open'] and vec_len(player['x'] - d['x'], player['y'] - d['y']) < CELL * 0.6:
-                current_level_index = (current_level_index + 1) % len(LEVELS)
-                load_level(current_level_index)
-                return
-
-    # update powerup timers
-    for pu in powerups:
-        if not pu['active'] and pu.get('timer',0) > 0:
-            pu['timer'] -= dt
-            if pu['timer'] <= 0:
-                pu['active'] = True
-
-    # ensure gun flag cleared when bullets exhausted
-    if player.get('has_gun') and player.get('gun_bullets', 0) <= 0:
-        player['has_gun'] = False
-
-    # melee collisions: if player is close to an enemy and presses F it will be handled in keyboard, but we must also detect frontal interactions for '3 interactions' when unarmed
-    for e in enemies:
-        if e['hp'] <= 0: continue
-        d = vec_len(e['x']-player['x'], e['y']-player['y'])
-        if d < PLAYER_SIZE*1.2:
-            # determine relative angle
-            desired = math.degrees(math.atan2(player['y']-e['y'], player['x']-e['x']))
-            diff = (desired - e['angle'] + 180) % 360 - 180
-            if abs(diff) < 60:
-                # player is in front of enemy; if player has no weapon, apply interactions slowly
-                if not player['has_gun'] and not player['has_knife'] and not player['invisible']:
-                    # deal damage to player slowly
-                    player['life'] -= 0.5 * dt  # continuous small damage
-                    if player['life'] <= 0:
-                        game_state = STATE_GAMEOVER
-
-    # update global alarm now that detections changed
-    update_global_alarm_level()
-
-# ---------------------------
-# Detect player by enemy
-# ---------------------------
-
-def detect_player_by_enemy(e):
-    # invisibility prevents detection
-    if player['invisible']:
-        return False
-    # rough checks
-    if not in_vision_cone(e['x'], e['y'], e['angle'], 70, CELL*6, player['x'], player['y']):
-        return False
-    # ensure line of sight
-    if not line_of_sight(e['x'], e['y'], player['x'], player['y']):
-        return False
-    return True
-
-# ---------------------------
-# Actions: bullets, powerups, doors
-# ---------------------------
-
-def fire_bullet(sx, sy, angle_deg, owner='player'):
-    # Use the same forward vector as movement (forward = -sin, cos)
-    rad = math.radians(angle_deg)
-    fx = -math.sin(rad)
-    fy = math.cos(rad)
-    vx = fx * BULLET_SPEED
-    vy = fy * BULLET_SPEED
-    # spawn bullet from chest (forward offset)
-    spawn_x = sx + fx * (PLAYER_SIZE * 0.9)
-    spawn_y = sy + fy * (PLAYER_SIZE * 0.9)
-    spawn_z = player.get('z', 20.0) + PLAYER_HEIGHT * 0.4 if owner == 'player' else 20.0
-    bullets.append({'x': spawn_x, 'y': spawn_y, 'z': spawn_z, 'vx': vx, 'vy': vy, 'owner': owner, 'life': 4.0})
-
-
-def take_powerup(pu):
-    t = pu['type']
-    # Keys are handled separately in update() -> let that code collect keys
-    if t == 'K':
+    if game_state != GAME_INSIDE:
         return
-    # Powerups (non-keys) are taken permanently (do not respawn)
-    pu['active'] = False
     
-    if t == 'G':
-        player['has_gun'] = True
-        player['gun_bullets'] = 3  # enough to kill at least 2 enemies per requirement
-        player['equipped'] = 'gun'
-    elif t == 'N':
-        player['has_knife'] = True
-        player['equipped'] = 'knife'
-    elif t == 'I':
-        player['invisible'] = True
-        player['invis_timer'] = POWERUP_DURATION
-    elif t == 'K':
-        # key
-        pass
-
-
-def melee_or_fire():
-    # Use equipped weapon semantics: 'gun', 'knife', 'unarmed'
-    eq = player.get('equipped', 'unarmed')
-    # Gun: consume bullets and fire
-    if eq == 'gun':
-        if player.get('has_gun') and player.get('gun_bullets', 0) > 0:
-            fire_bullet(player['x'], player['y'], player['angle'], 'player')
-            player['gun_bullets'] -= 1
-            # loud shot alerts nearby enemies with line of sight
-            for e in nearby_enemies(player['x'], player['y'], radius=CELL*5):
-                if line_of_sight(e['x'], e['y'], player['x'], player['y']):
-                    e['state'] = 'alerted'
-                    e['alerted_since'] = time.time()
-            if player['gun_bullets'] <= 0:
-                player['has_gun'] = False
-        return
-    # Knife: immediate melee damage to nearby enemy
-    if eq == 'knife':
-        for e in enemies:
-            d = vec_len(e['x'] - player['x'], e['y'] - player['y'])
-            if d < PLAYER_SIZE * 1.3:
-                e['hp'] -= KNIFE_DAMAGE
-                e['state'] = 'chasing'
-                return
-    # Unarmed: interactions needed to kill (uses melee_timer and interaction count)
-    for e in enemies:
-        d = vec_len(e['x'] - player['x'], e['y'] - player['y'])
-        if d < PLAYER_SIZE * 1.3:
-            if player.get('melee_timer', 0) <= 0:
-                player['melee_interaction_count'] = player.get('melee_interaction_count', 0) + 1
-                player['melee_timer'] = MELEE_COOLDOWN_UNARMED
-                if player['melee_interaction_count'] >= UNARMED_INTERACTIONS_TO_KILL:
-                    e['hp'] = 0
-                    player['melee_interaction_count'] = 0
-                e['state'] = 'chasing'
-            return
-
-
-    return
-
-# ---------------------------
-# Input handlers
-# ---------------------------
-
-keys = set()
-
-
-def keyboard(key, x, y):
-    global game_state, current_level_index
-    k = key.decode('utf-8') if isinstance(key, bytes) else key
-    if k.lower() == 'p':
-        if game_state == STATE_PLAY:
-            game_state = STATE_PAUSE
-        elif game_state == STATE_PAUSE:
-            game_state = STATE_PLAY
-    if k.lower() == 'r':
-        reset_game()
-    if game_state != STATE_PLAY:
-        return
-    if k.lower() == 'c':
-        toggle_camera()
-    if k == 'f' or k == 'F':
-        # interact with doors OR attempt takedown on nearby guard
-        rad = math.radians(player['angle'])
-        tx = player['x'] + math.cos(rad) * (CELL)
-        ty = player['y'] + math.sin(rad) * (CELL)
+    for pickup in pickups:
+        if pickup[3]:
+            continue
         
-        # Try takedown first
-        takedown_attempted = False
-        for guard in enemies:
-            if attempt_takedown(guard):
-                takedown_attempted = True
-                break
+        px, py, ptype, _ = pickup
+        if distance_2d(player_pos[0], player_pos[1], px, py) < 30:
+            pickup[3] = True
+            
+            if ptype == 'knife':
+                player_powerups['knife'] = True
+            elif ptype == 'gun':
+                player_powerups['gun'] = True
+                player_gun_ammo = 3
+            elif ptype == 'invisibility':
+                player_powerups['invisibility'] = True
+                invisibility_timer = 5.0
+                invisibility_active = True
+            elif ptype == 'distraction':
+                player_powerups['distraction'] = True
+
+                           
         
-        # If no takedown, try door
-        if not takedown_attempted:
-            try_open_door_at(tx, ty, opener='player')
-
-    # Weapon switch (cycle equipped if player has multiple)
-    # STEALTH: Throw distraction object
-    if k.lower() == 'g':
-        throw_distraction()
-
-    # STEALTH: Hide/Unhide
-    if k.lower() == 'h':
-        if player['in_hiding_spot']:
-            player['in_hiding_spot'] = False
-        elif check_near_hiding_spot():
-            player['in_hiding_spot'] = True
+                           
+def update_camera():
+    global camera_pos
     
-    # STEALTH: Hack terminal
-    if k.lower() == 'e':
-        # Check if near terminal
-        for term in terminals:
-            dist = vec_len(player['x'] - term['x'], player['y'] - term['y'])
-            if dist < CELL:
-                player['hacking_terminal'] = term
-                break
-
-    # Weapon switch (moved to O)
-    if k.lower() == 'o':
-        eq = player.get('equipped', 'unarmed')
-        if eq == 'unarmed':
-            if player.get('has_gun'):
-                player['equipped'] = 'gun'
-            elif player.get('has_knife'):
-                player['equipped'] = 'knife'
-        elif eq == 'gun':
-            if player.get('has_knife'):
-                player['equipped'] = 'knife'
-            else:
-                player['equipped'] = 'unarmed'
-        elif eq == 'knife':
-            player['equipped'] = 'unarmed'
-
-    # gun firing (also reachable via left-click)
-    # gun firing - changed to Q
-    if k.lower() == 'q':
-        melee_or_fire()
-
-    # movement keys
-    if k.lower() in ('w','a','s','d'):
-        keys.add(k.lower())
-
-
-def keyboard_up(key, x, y):
-    k = key.decode('utf-8') if isinstance(key, bytes) else key
-    if k.lower() in keys:
-        keys.discard(k.lower())
-
-
-def special_key(key, x, y):
-    # control camera zoom with up/down arrows
-    global cam_zoom
-    if key == GLUT_KEY_UP:
-        # zoom out (increase distance)
-        cam_zoom = min(cam_zoom + 0.1, 3.0)
-    if key == GLUT_KEY_DOWN:
-        # zoom in (decrease distance)
-        cam_zoom = max(cam_zoom - 0.1, 0.5)
-    if key == GLUT_KEY_LEFT:
-        pass  # reserved for future use
-    if key == GLUT_KEY_RIGHT:
-        pass  # reserved for future use
-
-# ---------------------------
-# Camera
-# ---------------------------
-
-def toggle_camera():
-    global camera_mode
-    camera_mode = CAM_FIRST if camera_mode == CAM_THIRD else CAM_THIRD
-
-
-def update_player_movement(dt):
-    # WASD relative to facing
-    if game_state != STATE_PLAY:
+    if camera_mode == 1:
+        camera_pos[0] = player_pos[0]
+        camera_pos[1] = player_pos[1]
+        camera_pos[2] = 80
         return
-    # Use reference movement style (relative to facing) but scaled by dt for time-consistency
-    rad = math.radians(player['angle'])
-    move_speed = PLAYER_SPEED  # units per second
-    forward = (-math.sin(rad), math.cos(rad))  # Fixed: correct forward direction
-    right = (math.cos(rad), math.sin(rad))
-    dx = 0.0
-    dy = 0.0
-    if 'w' in keys:
-        dx += forward[0] * move_speed * dt
-        dy += forward[1] * move_speed * dt
-    if 's' in keys:
-        dx -= forward[0] * move_speed * dt
-        dy -= forward[1] * move_speed * dt
-    if 'a' in keys:
-        # rotate left at controlled rate
-        player['angle'] = (player['angle'] + ROT_SPEED * dt) % 360
-    if 'd' in keys:
-        # rotate right
-        player['angle'] = (player['angle'] - ROT_SPEED * dt) % 360
-    # strafe
-    if 'a' not in keys and 'd' not in keys:
-        # allow strafing with Q/E in future; keep simple for now
-        pass
-    if dx != 0.0 or dy != 0.0:
-        if not collides_with_walls(player['x'] + dx, player['y'] + dy):
-            player['x'] += dx
-            player['y'] += dy
+    
+    rad = math.radians(player_angle)
+    camera_pos[0] = player_pos[0] - math.cos(rad) * 250
+    camera_pos[1] = player_pos[1] - math.sin(rad) * 250
+    camera_pos[2] = 450
 
-
-# Camera functions adapted from reference file
-def u_fp():
-    global camera_pos, camera_target, pcamera_pos, prefpc, prefp, prefpt, cam_zoom
-    # if player dead, keep previous camera
-    if game_state == STATE_GAMEOVER:
-        camera_pos = pcamera_pos
-        camera_target = (0,0,0)
-        return
-    # Use camera_mode to decide behavior: third-person or reference first-person
-    if camera_mode != CAM_FIRST:
-        # Third-person: camera stays fixed behind player (does NOT rotate with player)
-        # Camera offset is fixed in world space, not rotating with player
-        offset_dist = 200.0 * cam_zoom  # zoom affects distance
-        offset_height = 150.0
-        # Fixed position behind player (negative Y direction in world)
-        cx = player['x']
-        cy = player['y'] - offset_dist
-        cz = player['z'] + offset_height
-        # simple clip toward player to avoid wall penetration
-        steps = 8
-        ox, oy = player['x'], player['y']
-        for i in range(steps):
-            t = (i+1)/steps
-            sx = ox + (cx-ox)*t
-            sy = oy + (cy-oy)*t
-            if cell_is_wall_world(sx, sy):
-                cx = ox + (cx-ox)*(t-0.2)
-                cy = oy + (cy-oy)*(t-0.2)
-                break
-        camera_pos = (cx, cy, cz)
-        pcamera_pos = camera_pos
-        camera_target = (player['x'], player['y'], player['z']+10)
-        return
-    # first-person-like preferred view from reference: position above player, look ahead
-    rad = math.radians(player['angle'])
-    lx = player['x'] - math.sin(rad) * 50  # Fixed direction
-    ly = player['y'] + math.cos(rad) * 50  # Fixed direction
-    camera_pos = (player['x'], player['y'], 120)
-    camera_target = (lx, ly, 120)
-    prefpc = camera_pos
-    prefpt = camera_target
-
-
-def setupCamera():
+def setup_camera():
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    gluPerspective(fovY, WINDOW_W/float(WINDOW_H), 0.1, 4000)
+    
+    near_plane = 0.5 if camera_mode == 1 else 0.1
+    gluPerspective(60, W/H, near_plane, 2000)
+    
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
-    cx, cy, cz = camera_pos
-    tx, ty, tz = camera_target
-    gluLookAt(cx, cy, cz, tx, ty, tz, 0, 0, 1)
-
-# ---------------------------
-# Rendering (allowed GL calls only)
-# ---------------------------
-
-def draw_text_screen(x, y, s):
-    glMatrixMode(GL_PROJECTION)
-    glPushMatrix()
-    glLoadIdentity()
-    gluOrtho2D(0, WINDOW_W, 0, WINDOW_H)
-    glMatrixMode(GL_MODELVIEW)
-    glPushMatrix()
-    glLoadIdentity()
-    glColor3f(1.0, 1.0, 1.0)
-    glRasterPos2f(x, y)
-    for ch in s:
-        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, ord(ch))
-    glPopMatrix()
-    glMatrixMode(GL_PROJECTION)
-    glPopMatrix()
-    glMatrixMode(GL_MODELVIEW)
-
-
-def draw_cube_at(x, y, size, color=(0.6,0.6,0.6)):
-    glColor3f(*color)
-    glPushMatrix()
-    # position cube center at x,y, z=size/2
-    glTranslatef(x, y, size/2)
-    glutSolidCube(size)
-    glPopMatrix()
-
-
-def draw_player():
-    # body, head sphere, and hands attached to front
-    if player['invisible']:
-        glColor3f(0.1, 0.2, 0.1)  # dimmed green when invisible
+    
+    if camera_mode == 1:
+        rad = math.radians(player_angle)
+        look_x = camera_pos[0] + math.cos(rad) * 100
+        look_y = camera_pos[1] + math.sin(rad) * 100
+        look_z = camera_pos[2]
+        gluLookAt(camera_pos[0], camera_pos[1], camera_pos[2],
+                  look_x, look_y, look_z,
+                  0, 0, 1)
     else:
-        glColor3f(0.0, 1.0, 0.0)  # bright green - hero
-    glPushMatrix()
-    glTranslatef(player['x'], player['y'], player['z'])
-    glRotatef(player['angle'], 0, 0, 1)
-    
-    # torso (slimmer) - centered at origin
-    glColor3f(0.0, 1.0, 0.0)  # green body
-    glPushMatrix()
-    glTranslatef(0, 0, PLAYER_HEIGHT/2)
-    glScalef(0.6, 0.6, 1.0)  # make slimmer
-    glutSolidCube(PLAYER_HEIGHT)
-    glPopMatrix()
-    
-    # head (sphere) - BLACK
-    glPushMatrix()
-    glTranslatef(0, 0, PLAYER_HEIGHT + 6)
-    glColor3f(0.0, 0.0, 0.0)  # black head
-    quad = gluNewQuadric()
-    gluSphere(quad, 8, 12, 12)
-    glPopMatrix()
-    
-    # HANDS: 3 cubes each, in LOCAL SPACE attached to FRONT of body
-    # Hands positioned FORWARD (Y direction after rotation) and to the SIDES (X direction)
-    # Right hand - 3 cubes (side = +X, forward = +Y)
-    eq = player.get('equipped', 'unarmed')
-    for i in range(3):
-        glPushMatrix()
-        # Right side, forward from shoulder
-        glTranslatef(12, 8 + i*5, PLAYER_HEIGHT - 8)
-        # Change color if armed - front cube (i==2) changes color
-        if i == 2:  # front cube
-            if eq == 'gun':
-                glColor3f(0.8, 0.2, 0.0)  # orange-red when gun
-            elif eq == 'knife':
-                glColor3f(0.8, 0.0, 0.0)  # darker red when knife
-            else:
-                glColor3f(0.0, 1.0, 0.0)  # green hands normally
-        else:
-            glColor3f(0.0, 1.0, 0.0)  # green body
-        glScalef(5, 5, 5)
-        glutSolidCube(1)
-        glPopMatrix()
-    
-    # Left hand - 3 cubes (side = -X, forward = +Y)
-    for i in range(3):
-        glPushMatrix()
-        # Left side, forward from shoulder
-        glTranslatef(-12, 8 + i*5, PLAYER_HEIGHT - 8)
-        # Change color if armed - front cube (i==2) changes color
-        if i == 2:  # front cube
-            if eq == 'gun':
-                glColor3f(0.8, 0.2, 0.0)  # orange-red when gun
-            elif eq == 'knife':
-                glColor3f(0.8, 0.0, 0.0)  # darker red when knife
-            else:
-                glColor3f(0.0, 1.0, 0.0)  # green hands normally
-        else:
-            glColor3f(0.0, 1.0, 0.0)  # green body
-        glScalef(5, 5, 5)
-        glutSolidCube(1)
-        glPopMatrix()
-    
-    glPopMatrix()
+        gluLookAt(camera_pos[0], camera_pos[1], camera_pos[2],
+                  player_pos[0], player_pos[1], 35,
+                  0, 0, 1)
 
-
-def draw_enemy(e):
-    if e['hp'] <= 0:
-        return
-    
-    # Calculate vision cone in world space
-    rad = math.radians(e['angle'])
-    fx = -math.sin(rad)  # forward direction
-    fy = math.cos(rad)
-    rx = math.cos(rad)   # right direction (perpendicular to forward)
-    ry = math.sin(rad)
-    
-    # Eye position in world space (at head height, centered)
-    eye_x = e['x']
-    eye_y = e['y']
-    eye_z = e['z'] + PLAYER_HEIGHT + 6
-    
-    # Vision cone geometry - small cone (2-3 cells) that is blocked by walls
-    far_dist = CELL * 2.5  # smaller vision range
-    side_spread = CELL * 0.8
-    
-    # Check for wall blockage by tracing from eye toward target points
-    def is_cone_point_blocked(px, py):
-        # Simple ray trace: check if line from eye to point crosses wall
-        steps = 10
-        for i in range(1, steps):
-            t = i / steps
-            check_x = eye_x + (px - eye_x) * t
-            check_y = eye_y + (py - eye_y) * t
-            if cell_is_wall_world(check_x, check_y):
-                return True
-        return False
-    
-    left_x = eye_x + fx * far_dist - rx * side_spread
-    left_y = eye_y + fy * far_dist - ry * side_spread
-    right_x = eye_x + fx * far_dist + rx * side_spread
-    right_y = eye_y + fy * far_dist + ry * side_spread
-    far_x = eye_x + fx * far_dist
-    far_y = eye_y + fy * far_dist
-    
-    # Block cone parts if walls are in the way
-    left_blocked = is_cone_point_blocked(left_x, left_y)
-    right_blocked = is_cone_point_blocked(right_x, right_y)
-    far_blocked = is_cone_point_blocked(far_x, far_y)
-    
-    e['vision_cone'] = {
-        'eye_x': eye_x,
-        'eye_y': eye_y,
-        'eye_z': eye_z,
-        'left_x': left_x,
-        'left_y': left_y,
-        'left_blocked': left_blocked,
-        'right_x': right_x,
-        'right_y': right_y,
-        'right_blocked': right_blocked,
-        'far_x': far_x,
-        'far_y': far_y,
-        'far_blocked': far_blocked,
-    }
-    
-    # Now draw the body in local space
-    glPushMatrix()
-    glTranslatef(e['x'], e['y'], e['z'])
-    glRotatef(e['angle'], 0, 0, 1)
-    
-    # body - red (slimmer)
-    glColor3f(1.0, 0.0, 0.0)
-    glPushMatrix()
-    glTranslatef(0, 0, PLAYER_HEIGHT/2)
-    glScalef(0.6, 0.6, 1.0)  # make slimmer
-    glutSolidCube(PLAYER_HEIGHT)
-    glPopMatrix()
-    
-    # head - BLACK
-    glPushMatrix()
-    glTranslatef(0, 0, PLAYER_HEIGHT + 6)
-    quad = gluNewQuadric()
-    glColor3f(0.0, 0.0, 0.0)  # black head
-    gluSphere(quad, 8, 12, 12)
-    glPopMatrix()
-    
-    # Gun hand - single, ash/silver color, 2 cubes, in LOCAL space
-    glColor3f(0.5, 0.5, 0.5)  # ash/silver color
-    
-    # Barrel cube (front of body)
-    glPushMatrix()
-    glTranslatef(0, 8, PLAYER_HEIGHT - 8)  # forward from shoulder
-    glScalef(8, 4, 4)  # elongated like a gun barrel
-    glutSolidCube(1)
-    glPopMatrix()
-    
-    # Front extension cube
-    glPushMatrix()
-    glTranslatef(0, 14, PLAYER_HEIGHT - 8)  # further forward
-    glScalef(6, 3, 3)  # front extension
-    glutSolidCube(1)
-    glPopMatrix()
-    
-    glPopMatrix()
-    
-    # Draw vision cone in world space (after popping matrix)
-    cone = e['vision_cone']
-    glColor3f(1.0, 1.0, 0.0)  # bright yellow vision cone
-    glBegin(GL_TRIANGLES)
-    # left side
-    glVertex3f(cone['eye_x'], cone['eye_y'], cone['eye_z'])
-    glVertex3f(cone['left_x'], cone['left_y'], 1)
-    glVertex3f(cone['far_x'], cone['far_y'], 1)
-    # right side
-    glVertex3f(cone['eye_x'], cone['eye_y'], cone['eye_z'])
-    glVertex3f(cone['far_x'], cone['far_y'], 1)
-    glVertex3f(cone['right_x'], cone['right_y'], 1)
+                           
+                        
+                           
+def draw_ground(size, tile_size=100):
+    glBegin(GL_QUADS)
+    for x in range(-size, size, tile_size):
+        for y in range(-size, size, tile_size):
+                             
+            if ((x//tile_size) + (y//tile_size)) % 2 == 0:
+                glColor3f(0.3, 0.6, 0.3)
+            else:
+                glColor3f(0.25, 0.55, 0.25)
+            
+                                                 
+            glVertex3f(x, y, 0)
+            glVertex3f(x + tile_size, y, 0)
+            glVertex3f(x + tile_size, y + tile_size, 0)
+            glVertex3f(x, y + tile_size, 0)
     glEnd()
 
+def draw_exterior_path():
+    hx, hy, _ = HOUSE_POS
+    spawn_y = -OUTSIDE_SIZE + 80
+    
+                             
+    path_width = 70
+    path_color = [0.45, 0.35, 0.25]         
+    
+    glColor3f(path_color[0], path_color[1], path_color[2])
+    glBegin(GL_QUADS)
+                                         
+    glVertex3f(-path_width//2, spawn_y, 0.5)
+    glVertex3f(path_width//2, spawn_y, 0.5)
+    glVertex3f(path_width//2, hy - HOUSE_SIZE//2 - 30, 0.5)
+    glVertex3f(-path_width//2, hy - HOUSE_SIZE//2 - 30, 0.5)
+    glEnd()
 
-def draw_world():
-    # Build wall cells with bounds checking
-    wall_cells = set()
-    for y in range(map_h):
-        for x in range(map_w):
-            if x < len(world_map[y]) and world_map[y][x] == '#':
-                wall_cells.add((x, y))
+def draw_sky():
+                                                                
     
-    # FIRST: Draw floor and ceiling for all corridor cells (render first so pillars appear on top)
-    for y in range(map_h):
-        for x in range(map_w):
-            if x >= len(world_map[y]):
-                continue
-            ch = world_map[y][x]
-            if ch != '#':
-                # Corridor cell
-                wx = (x - map_w // 2) * CELL
-                wy = (y - map_h // 2) * CELL
-                
-                # floor quad with alternating tint
-                if (x+y) % 2 == 0:
-                    glColor3f(0.3, 0.5, 0.3)  # light green
-                else:
-                    glColor3f(0.5, 0.3, 0.3)  # light red
-                glBegin(GL_QUADS)
-                glVertex3f(wx - CELL/2, wy - CELL/2, 0)
-                glVertex3f(wx + CELL/2, wy - CELL/2, 0)
-                glVertex3f(wx + CELL/2, wy + CELL/2, 0)
-                glVertex3f(wx - CELL/2, wy + CELL/2, 0)
-                glEnd()
-                # ceiling quad
-                glColor3f(0.2, 0.2, 0.2)  # dark gray ceiling
-                glBegin(GL_QUADS)
-                glVertex3f(wx - CELL/2, wy - CELL/2, CORRIDOR_HEIGHT)
-                glVertex3f(wx + CELL/2, wy - CELL/2, CORRIDOR_HEIGHT)
-                glVertex3f(wx + CELL/2, wy + CELL/2, CORRIDOR_HEIGHT)
-                glVertex3f(wx - CELL/2, wy + CELL/2, CORRIDOR_HEIGHT)
-                glEnd()
+    glPushMatrix()
+    glTranslatef(player_pos[0], player_pos[1], 0)
     
-    # SECOND: Draw walls as tall RED cylinder pillars (render on top of floor)
-    quad = gluNewQuadric()
-    glColor3f(0.9, 0.15, 0.15)  # Bright red
+                             
+    glBegin(GL_QUADS)
+    glColor3f(0.4, 0.6, 0.9)                 
+    glVertex3f(-2000, -2000, 800)
+    glVertex3f(2000, -2000, 800)
+    glColor3f(0.7, 0.8, 1.0)                         
+    glVertex3f(2000, 2000, 200)
+    glVertex3f(-2000, 2000, 200)
+    glEnd()
     
-    for y in range(map_h):
-        for x in range(map_w):
-            if (x, y) in wall_cells:
-                wx = (x - map_w // 2) * CELL
-                wy = (y - map_h // 2) * CELL
-                
-                # Draw tall red cylinder pillar
-                glPushMatrix()
-                glTranslatef(wx, wy, 0)
-                glColor3f(0.9, 0.15, 0.15)  # Bright red
-                gluCylinder(quad, CELL * 0.35, CELL * 0.35, CORRIDOR_HEIGHT, 16, 4)
-                glPopMatrix()
+    glPopMatrix()
     
-    # doors
-    for d in doors:
-        if not d['open']:
-            # closed door as cube - bright blue
-            draw_cube_at(d['x'], d['y'], CELL, color=(0.0, 0.0, 1.0))
-        else:
-            # open door drawn as flat mark - bright blue (darker)
-            glColor3f(0.0, 0.0, 0.7)
-            glBegin(GL_QUADS)
-            glVertex3f(d['x'] - CELL/4, d['y'] - CELL/2, 1)
-            glVertex3f(d['x'] + CELL/4, d['y'] - CELL/2, 1)
-            glVertex3f(d['x'] + CELL/4, d['y'] + CELL/2, 1)
-            glVertex3f(d['x'] - CELL/4, d['y'] + CELL/2, 1)
-            glEnd()
-    # powerups
-    for pu in powerups:
-        if not pu['active']:
+                                                                   
+
+def draw_baseboards():
+    glColor3f(0.15, 0.12, 0.10)
+    baseboard_height = 8
+    
+                                                             
+                                                    
+    bounds = [
+        [-MAZE_SIZE, -MAZE_SIZE, MAZE_SIZE, -MAZE_SIZE],
+        [MAZE_SIZE, -MAZE_SIZE, MAZE_SIZE, MAZE_SIZE],
+        [MAZE_SIZE, MAZE_SIZE, -MAZE_SIZE, MAZE_SIZE],
+        [-MAZE_SIZE, MAZE_SIZE, -MAZE_SIZE, -MAZE_SIZE],
+    ]
+    
+    for x1, y1, x2, y2 in bounds:
+        dx, dy = x2 - x1, y2 - y1
+        length = math.sqrt(dx*dx + dy*dy)
+        if length < 0.1:
             continue
-        if pu['type'] == 'G':
-            glColor3f(0.0, 1.0, 0.0)  # bright green - gun
-        elif pu['type'] == 'N':
-            glColor3f(1.0, 1.0, 0.0)  # bright yellow - knife
-        elif pu['type'] == 'I':
-            glColor3f(1.0, 0.0, 1.0)  # bright magenta - invisibility
-        elif pu['type'] == 'K':
-            glColor3f(1.0, 0.5, 0.0)  # bright orange - key
+        
+                                
+        nx, ny = -dy/length, dx/length
+        offset = 2
+        fx1, fy1 = x1 + nx * offset, y1 + ny * offset
+        fx2, fy2 = x2 + nx * offset, y2 + ny * offset
+        
+        glBegin(GL_QUADS)
+                                             
+        glVertex3f(fx1, fy1, 0)
+        glVertex3f(fx2, fy2, 0)
+        glVertex3f(fx2, fy2, baseboard_height)
+        glVertex3f(fx1, fy1, baseboard_height)
+        glEnd()
+
+def draw_ceiling_beams():
+    glColor3f(0.25, 0.20, 0.18)
+    beam_width = 12
+    beam_thickness = 8
+    ceiling_z = 120
+    
+                                        
+    for i in range(-3, 4):
+        beam_y = i * 100
         glPushMatrix()
-        glTranslatef(pu['x'], pu['y'], pu['z'])
-        quad = gluNewQuadric()
-        gluSphere(quad, 8, 8, 8)
+        glTranslatef(0, beam_y, ceiling_z - beam_thickness//2)
+        glScalef(MAZE_SIZE * 1.8, beam_width, beam_thickness)
+        glutSolidCube(1)
         glPopMatrix()
 
-    # player and enemies
-    draw_player()
-    for e in enemies:
-        draw_enemy(e)
-    # bullets
-    for b in bullets:
-        glColor3f(1.0, 1.0, 1.0) if b['owner']=='player' else glColor3f(1.0, 0.0, 0.0)  # white player bullets, red enemy bullets
+def draw_doorway_frames():
+    glColor3f(0.3, 0.25, 0.22)
+    frame_width = 60
+    frame_height = 80
+    frame_thickness = 8
+    
+                                      
+    doorway_positions = [
+        [0, -150],
+        [0, 0],
+        [0, 180],
+    ]
+    
+    for dx, dy in doorway_positions:
+                   
         glPushMatrix()
-        glTranslatef(b['x'], b['y'], b['z'])
-        quad = gluNewQuadric()
-        gluSphere(quad, BULLET_RADIUS, 8, 8)
+        glTranslatef(dx - frame_width//2, dy, frame_height//2)
+        glScalef(frame_thickness, frame_thickness, frame_height)
+        glutSolidCube(1)
+        glPopMatrix()
+        
+                    
+        glPushMatrix()
+        glTranslatef(dx + frame_width//2, dy, frame_height//2)
+        glScalef(frame_thickness, frame_thickness, frame_height)
+        glutSolidCube(1)
+        glPopMatrix()
+        
+                  
+        glPushMatrix()
+        glTranslatef(dx, dy, frame_height)
+        glScalef(frame_width + frame_thickness * 2, frame_thickness, frame_thickness)
+        glutSolidCube(1)
         glPopMatrix()
 
-# ---------------------------
-# Main display and loop
-# ---------------------------
+def draw_wall_segment(x1, y1, x2, y2, height, thickness=MAZE_WALL_THICKNESS):
+    dx, dy = x2 - x1, y2 - y1
+    length = math.sqrt(dx*dx + dy*dy)
+    if length < 0.1:
+            return                              
+    
+    px, py = -dy/length * thickness/2, dx/length * thickness/2
+    
+    corners = [
+        [x1 + px, y1 + py, 0],
+        [x2 + px, y2 + py, 0],
+        [x2 - px, y2 - py, 0],
+        [x1 - px, y1 - py, 0]
+    ]
+    
+            
+    glColor3f(0.4, 0.35, 0.3)
+    glBegin(GL_QUADS)
+                                         
+    for c in corners:
+        glVertex3f(c[0], c[1], c[2])
+    glEnd()
+    
+         
+    glBegin(GL_QUADS)
+                                         
+    for i in [3, 2, 1, 0]:
+        glVertex3f(corners[i][0], corners[i][1], height)
+    glEnd()
+    
+                                              
+                                                                          
+    brick_color = [0.45, 0.30, 0.24]                       
+    mortar_color = [0.28, 0.25, 0.22]                 
+    
+    for i in range(4):
+        next_i = (i + 1) % 4
+        fx1, fy1 = corners[i][0], corners[i][1]
+        fx2, fy2 = corners[next_i][0], corners[next_i][1]
+        fdx, fdy = fx2 - fx1, fy2 - fy1
+        fn_len = math.sqrt(fdx*fdx + fdy*fdy)
+        
+        if fn_len < 0.001:
+            continue
+        
+        nx, ny = -fdy/fn_len, fdx/fn_len
+        
+                              
+                                                                      
+        if i == 0 or i == 2:
+            face_shade = 1.0
+        else:
+            face_shade = 0.88
+        glColor3f(brick_color[0] * face_shade, brick_color[1] * face_shade, brick_color[2] * face_shade)
+        
+        glBegin(GL_QUADS)
+                                             
+        glVertex3f(corners[i][0], corners[i][1], 0)
+        glVertex3f(corners[next_i][0], corners[next_i][1], 0)
+        glVertex3f(corners[next_i][0], corners[next_i][1], height)
+        glVertex3f(corners[i][0], corners[i][1], height)
+        glEnd()
+        
+                                                                  
+        if i == 0 or i == 2:
+                                                           
+            glColor3f(mortar_color[0], mortar_color[1], mortar_color[2])
+            glLineWidth(1.5)
+            
+            glBegin(GL_LINES)
+                                                                      
+            for z_line in range(24, int(height), 48):
+                glVertex3f(fx1, fy1, z_line)
+                glVertex3f(fx2, fy2, z_line)
+            
+                                                    
+            num_vlines = max(1, int(fn_len / 160))
+            for v in range(1, num_vlines + 1):
+                t = v / (num_vlines + 1)
+                vx = fx1 + fdx * t
+                vy = fy1 + fdy * t
+                glVertex3f(vx, vy, 0)
+                glVertex3f(vx, vy, height)
+            glEnd()
+            
+            glLineWidth(1.0)
+
+def draw_tree(x, y, scale):
+    glPushMatrix()
+    glTranslatef(x, y, 0)
+    
+           
+    glColor3f(0.4, 0.25, 0.15)
+    glPushMatrix()
+    glTranslatef(0, 0, 20 * scale)
+    gluCylinder(quadric, 8*scale, 6*scale, 30*scale, 8, 2)
+    glPopMatrix()
+    
+                     
+    glColor3f(0.2, 0.5, 0.2)
+    glPushMatrix()
+    glTranslatef(0, 0, 50 * scale)
+    gluSphere(quadric, 25 * scale, 10, 10)
+    glPopMatrix()
+
+                               
+    glPopMatrix()
+
+def draw_house():
+    hx, hy, hz = HOUSE_POS
+    
+    glPushMatrix()
+    glTranslatef(hx, hy, hz)
+    
+                     
+    door_width = 60
+    door_height = 80
+    wall_thickness = WALL_THICKNESS
+    
+                                    
+    glColor3f(0.3, 0.25, 0.28)
+                             
+    glPushMatrix()
+    glTranslatef(-HOUSE_SIZE//2 + (HOUSE_SIZE//2 - door_width//2)//2, -HOUSE_SIZE//2, 60)
+    glScalef(HOUSE_SIZE//2 - door_width//2, wall_thickness, 120)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                              
+    glPushMatrix()
+    glTranslatef(HOUSE_SIZE//2 - (HOUSE_SIZE//2 - door_width//2)//2, -HOUSE_SIZE//2, 60)
+    glScalef(HOUSE_SIZE//2 - door_width//2, wall_thickness, 120)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                                    
+    glPushMatrix()
+    glTranslatef(0, -HOUSE_SIZE//2, door_height + (120 - door_height)//2)
+    glScalef(door_width, wall_thickness, 120 - door_height)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                       
+    glPushMatrix()
+    glTranslatef(0, HOUSE_SIZE//2, 60)
+    glScalef(HOUSE_SIZE, wall_thickness, 120)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                       
+    glPushMatrix()
+    glTranslatef(-HOUSE_SIZE//2, 0, 60)
+    glScalef(wall_thickness, HOUSE_SIZE, 120)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                        
+    glPushMatrix()
+    glTranslatef(HOUSE_SIZE//2, 0, 60)
+    glScalef(wall_thickness, HOUSE_SIZE, 120)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+          
+    glColor3f(0.2, 0.15, 0.18)
+    glPushMatrix()
+    glTranslatef(0, 0, 125)
+    glScalef(HOUSE_SIZE * 1.1, HOUSE_SIZE * 1.1, 10)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                    
+    glColor3f(0.35, 0.3, 0.32)
+    glPushMatrix()
+    glTranslatef(0, -HOUSE_SIZE//2 - 25, 2)
+    glScalef(door_width + 20, 40, 4)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                             
+    glColor3f(0.25, 0.2, 0.22)
+                
+    glPushMatrix()
+    glTranslatef(-door_width//2 - 3, -HOUSE_SIZE//2 - 2, door_height//2)
+    glScalef(6, 8, door_height)
+    glutSolidCube(1)
+    glPopMatrix()
+                 
+    glPushMatrix()
+    glTranslatef(door_width//2 + 3, -HOUSE_SIZE//2 - 2, door_height//2)
+    glScalef(6, 8, door_height)
+    glutSolidCube(1)
+    glPopMatrix()
+               
+    glPushMatrix()
+    glTranslatef(0, -HOUSE_SIZE//2 - 2, door_height + 3)
+    glScalef(door_width + 12, 8, 6)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                                                                            
+    pulse = 1.0 + 0.3 * math.sin(animation_time * 0.15)
+    glColor3f(0.9 * pulse, 0.3 * pulse, 0.3 * pulse)
+    glPushMatrix()
+    glTranslatef(0, -HOUSE_SIZE//2 - 8, door_height + 15)
+    gluSphere(quadric, 8 * pulse, 12, 12)
+    glPopMatrix()
+                                                
+    glColor3f(0.4 * pulse, 0.12 * pulse, 0.12 * pulse)
+    glPushMatrix()
+    glTranslatef(0, -HOUSE_SIZE//2 - 8, door_height + 15)
+    gluSphere(quadric, 15 * pulse, 12, 12)
+    glPopMatrix()
+
+                                
+    glPopMatrix()
+
+def draw_gun_firstperson():
+    if player_weapon_state != 2:
+        return
+    
+    glPushMatrix()
+    
+    glTranslatef(camera_pos[0], camera_pos[1], camera_pos[2])
+    glRotatef(-player_angle + 90, 0, 0, 1)
+    
+    glTranslatef(30, 60, -40)
+    
+    glColor3f(0.8, 0.7, 0.6)
+    glPushMatrix()
+    glTranslatef(-10, 0, 0)
+    glScalef(8, 15, 8)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+    glColor3f(0.7, 0.7, 0.7)
+    glPushMatrix()
+    glTranslatef(5, 10, 0)
+    glScalef(12, 20, 6)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+    glColor3f(0.2, 0.2, 0.2)
+    glPushMatrix()
+    glTranslatef(0, 0, -5)
+    glScalef(3, 3, 3)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+    glPopMatrix()
+
+def draw_roblox_character(x, y, angle, color):
+                                                                   
+    glPushMatrix()
+    glTranslatef(x, y, 0)
+    glRotatef(-angle + 90, 0, 0, 1)
+
+                      
+    base_height = 32
+    head_size = 18
+    torso_w, torso_h, torso_d = 16, 24, 10
+    arm_w, arm_h, arm_d = 5, 16, 6
+    leg_w, leg_h, leg_d = 6, 18, 6
+
+                          
+    swing = 0
+    if player_moved_this_frame and (abs(x - player_pos[0]) < 1 and abs(y - player_pos[1]) < 1):
+        swing = math.sin(animation_time * 0.3) * 20
+
+           
+    glPushMatrix()
+    glTranslatef(0, 0, base_height)
+    glScalef(torso_w, torso_d, torso_h)
+    glColor3f(color[0], color[1], color[2])
+    glutSolidCube(1)
+    glPopMatrix()
+
+                                       
+    glPushMatrix()
+    glTranslatef(0, 0, base_height + torso_h/2 + head_size/2)
+    glScalef(head_size, head_size, head_size)
+    glColor3f(1.0, 0.9, 0.8)
+    glutSolidCube(1)
+                                 
+    glPushMatrix()
+    glTranslatef(-head_size*0.18, head_size*0.28, 0.1)
+    glScalef(0.18, 0.08, 0.08)
+    glColor3f(1,1,1)
+    glutSolidCube(1)
+    glPopMatrix()
+    glPushMatrix()
+    glTranslatef(head_size*0.18, head_size*0.28, 0.1)
+    glScalef(0.18, 0.08, 0.08)
+    glColor3f(1,1,1)
+    glutSolidCube(1)
+    glPopMatrix()
+                               
+    glPushMatrix()
+    glTranslatef(-head_size*0.18, head_size*0.32, 0.2)
+    glScalef(0.08, 0.04, 0.04)
+    glColor3f(0,0,0)
+    glutSolidCube(1)
+    glPopMatrix()
+    glPushMatrix()
+    glTranslatef(head_size*0.18, head_size*0.32, 0.2)
+    glScalef(0.08, 0.04, 0.04)
+    glColor3f(0,0,0)
+    glutSolidCube(1)
+    glPopMatrix()
+    glPopMatrix()
+
+                   
+    for side in [-1, 1]:
+        glPushMatrix()
+        glTranslatef(side * (torso_w/2 + arm_w/2 + 1), 0, base_height + torso_h/2 - 2)
+        glRotatef(swing * side, 1, 0, 0)
+        glScalef(arm_w, arm_d, arm_h)
+        glColor3f(0.9*color[0], 0.9*color[1], 0.9*color[2])
+        glutSolidCube(1)
+        glPopMatrix()
+
+          
+    for side in [-1, 1]:
+        glPushMatrix()
+        glTranslatef(side * (torso_w/4), 0, leg_h/2)
+        glRotatef(-swing * side * 0.5, 1, 0, 0)
+        glScalef(leg_w, leg_d, leg_h)
+        glColor3f(0.15, 0.15, 0.15)
+        glutSolidCube(1)
+        glPopMatrix()
+
+                                            
+                                                           
+    gun_x = torso_w/2 + 8
+    gun_y = 0
+    gun_z = base_height + torso_h/2
+    
+                                                        
+    glPushMatrix()
+    glTranslatef(gun_x, gun_y + 4, gun_z)
+    glScalef(4, 10, 4)                
+    glColor3f(0.2, 0.2, 0.2)                   
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                             
+    glPushMatrix()
+    glTranslatef(gun_x, gun_y, gun_z - 6)
+    glScalef(5, 4, 8)              
+    glColor3f(0.3, 0.2, 0.15)              
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                                  
+    glPushMatrix()
+    glTranslatef(gun_x, gun_y + 4, gun_z + 2)
+    glScalef(3, 8, 3)
+    glColor3f(0.25, 0.25, 0.25)              
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                                      
+    glPushMatrix()
+    glTranslatef(gun_x, gun_y + 12, gun_z)
+    glScalef(3, 2, 3)
+    glColor3f(0.1, 0.1, 0.1)             
+    glutSolidCube(1)
+    glPopMatrix()
+
+    glPopMatrix()
+
+def draw_enemy(enemy):
+    if isinstance(enemy, dict):
+        ex = enemy.get('x', 0)
+        ey = enemy.get('y', 0)
+        hp = enemy.get('hp', 0)
+        angle = enemy.get('angle', 0)
+        alerted = enemy.get('alerted', False)
+    else:
+        ex, ey, hp, angle, state, tx, ty, cd = enemy
+
+    if hp <= 0:
+        return
+    
+    body_color = [0.45, 0.12, 0.12] if alerted else [0.25, 0.25, 0.25]
+    draw_roblox_character(ex, ey, angle, body_color)
+    
+    eye_color = (1.0, 0.2, 0.2) if alerted else (1.0, 0.9, 0.2)
+    head_size = 18
+    torso_h = 24
+    base_height = 32
+    eye_z = base_height + torso_h/2 + head_size*0.2
+    glPushMatrix()
+    glTranslatef(ex, ey, eye_z)
+    glRotatef(-angle + 90, 0, 0, 1)
+    for side in [-1, 1]:
+        glPushMatrix()
+        glTranslatef(side * (head_size*0.18), head_size*0.28, 0.1)
+        glColor3f(*eye_color)
+        gluSphere(quadric, 1.6, 8, 8)
+        glPopMatrix()
+    glPopMatrix()
+    
+    glPushMatrix()
+    glTranslatef(ex, ey, 10)
+    glRotatef(-angle + 90, 0, 0, 1)
+    
+    glColor4f(1.0, 1.0, 0.0, 0.3) if not alerted else glColor4f(1.0, 0.0, 0.0, 0.5)
+    glBegin(GL_TRIANGLES)
+    rad_left = math.radians(-CONE_ANGLE)
+    rad_right = math.radians(CONE_ANGLE)
+    glVertex3f(0, 0, 0)
+    glVertex3f(CONE_LENGTH * math.cos(rad_left), CONE_LENGTH * math.sin(rad_left), 0)
+    glVertex3f(CONE_LENGTH * math.cos(rad_right), CONE_LENGTH * math.sin(rad_right), 0)
+    glEnd()
+    
+    glPopMatrix()
+
+def draw_pickup(pickup):
+    px, py, ptype, collected = pickup
+    
+    if collected:
+        return
+    
+    glPushMatrix()
+    glTranslatef(px, py, 15 + math.sin(animation_time * 0.2) * 5)
+    
+    if ptype == 'knife':
+        glColor3f(0.7, 0.7, 0.7)
+    elif ptype == 'gun':
+        glColor3f(0.3, 0.3, 0.3)
+    elif ptype == 'invisibility':
+        glColor3f(0.5, 0.8, 1.0)
+    elif ptype == 'distraction':
+        glColor3f(1.0, 0.5, 0.0)
+    else:
+        glColor3f(1.0, 1.0, 0.3)
+    
+    glutSolidCube(12)
+    
+    glPopMatrix()
+
+def draw_bullet(bullet):
+    bx, by, bz = bullet[:3]
+    
+    glPushMatrix()
+    glTranslatef(bx, by, bz)
+    
+    glColor3f(1.0, 0.9, 0.3)
+    gluSphere(quadric, 4, 8, 8)
+    
+    glPopMatrix()
+
+def draw_floor_inside():
+    tile_size = 120                                            
+    base_color = [0.55, 0.45, 0.30]             
+    alt_color = [0.50, 0.40, 0.27]                    
+    
+    glBegin(GL_QUADS)
+                                         
+    
+    y = -MAZE_SIZE
+    while y < MAZE_SIZE:
+        x = -MAZE_SIZE
+        while x < MAZE_SIZE:
+                               
+            if ((int(x / tile_size) + int(y / tile_size)) % 2 == 0):
+                glColor3f(base_color[0], base_color[1], base_color[2])
+            else:
+                glColor3f(alt_color[0], alt_color[1], alt_color[2])
+            
+            glVertex3f(x, y, 0)
+            glVertex3f(x + tile_size, y, 0)
+            glVertex3f(x + tile_size, y + tile_size, 0)
+            glVertex3f(x, y + tile_size, 0)
+            
+            x += tile_size
+        y += tile_size
+    
+    glEnd()
+
+def draw_ceiling_inside():
+                                                                        
+    return
+
+def draw_entry_door_frame():
+                                  
+    frame_x = 0
+    frame_y = -MAZE_SIZE + 80
+    frame_width = 50
+    frame_height = 70
+    
+    glColor3f(0.3, 0.25, 0.22)
+    
+               
+    glPushMatrix()
+    glTranslatef(frame_x - frame_width//2, frame_y, frame_height//2)
+    glScalef(6, 8, frame_height)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+                
+    glPushMatrix()
+    glTranslatef(frame_x + frame_width//2, frame_y, frame_height//2)
+    glScalef(6, 8, frame_height)
+    glutSolidCube(1)
+    glPopMatrix()
+    
+              
+    glPushMatrix()
+    glTranslatef(frame_x, frame_y, frame_height)
+    glScalef(frame_width + 12, 8, 6)
+    glutSolidCube(1)
+    glPopMatrix()
+
+def draw_interior_props():
+                             
+    glColor3f(0.25, 0.2, 0.18)
+    props = [
+        [-200, -150, 15],
+        [180, 220, 12],
+        [-250, 180, 18],
+        [150, -200, 14],
+    ]
+    for px, py, size in props:
+        glPushMatrix()
+        glTranslatef(px, py, size)
+        glScalef(1.2, 0.8, 1.0)
+        glutSolidCube(size * 2)
+        glPopMatrix()
+    
+             
+    glColor3f(0.2, 0.2, 0.23)
+    pillars = [
+        [0, 0],
+        [200, 200],
+        [-200, 200],
+        [200, -200],
+    ]
+    for px, py in pillars:
+        glPushMatrix()
+        glTranslatef(px, py, 50)
+        gluCylinder(quadric, 12, 12, 100, 8, 2)
+        glPopMatrix()
+    
+                                                  
+    lamp_positions = [
+        [0, -250, 60],
+        [0, -100, 60],
+        [0, 100, 60],
+        [0, 250, 60],
+    ]
+    for lx, ly, lz in lamp_positions:
+        pulse = 0.7 + 0.2 * math.sin(animation_time * 0.1)
+        glColor3f(0.6 * pulse, 0.5 * pulse, 0.3 * pulse)
+        glPushMatrix()
+        glTranslatef(lx, ly, lz)
+        gluSphere(quadric, 6, 8, 8)
+        glPopMatrix()
+    
+
+def draw_exit_door():
+    if not exit_door_trigger:
+        return
+    
+    ex, ey, radius = exit_door_trigger
+    
+    pulse = 1.0 + 0.3 * math.sin(animation_time * 0.2)
+    
+    if exit_door_open:
+                                             
+        glColor3f(0.2 * pulse, 1.0 * pulse, 0.2 * pulse)
+    else:
+                                    
+        glColor3f(0.5, 0.2, 0.2)
+    
+    glPushMatrix()
+    glTranslatef(ex, ey, 50)
+    glutSolidCube(60)
+    glPopMatrix()
+
+                           
+                
+                           
+def render_outside():
+    glClearColor(0.5, 0.7, 0.9, 1.0)
+    
+    if camera_mode == 1:
+        glPushMatrix()
+        glTranslatef(camera_pos[0], camera_pos[1], camera_pos[2])
+        
+        glBegin(GL_QUADS)
+        glColor3f(0.5, 0.7, 1.0)
+        glVertex3f(-1500, -1500, 800)
+        glVertex3f(1500, -1500, 800)
+        glVertex3f(1500, 1500, 200)
+        glVertex3f(-1500, 1500, 200)
+        glEnd()
+        
+        glPopMatrix()
+    else:
+        draw_sky()
+    
+    draw_ground(OUTSIDE_SIZE)
+    
+                        
+    draw_exterior_path()
+    
+           
+    glColor3f(0.4, 0.4, 0.45)
+    for rock in rocks:
+        rx, ry, size = rock
+        glPushMatrix()
+        glTranslatef(rx, ry, size * 0.4)
+        glScalef(1.2, 0.9, 0.7)                   
+        glutSolidCube(size)
+        glPopMatrix()
+    
+           
+    for tree in trees:
+        draw_tree(tree[0], tree[1], tree[2])
+    
+           
+    glColor3f(0.4, 0.3, 0.25)
+    for post in fence_posts:
+        glPushMatrix()
+        glTranslatef(post[0], post[1], 25)
+        gluCylinder(quadric, 5, 5, 50, 8, 2)
+        glPopMatrix()
+    
+    draw_house()
+    
+    if invisibility_active:
+        glColor4f(0.3, 0.5, 0.9, 0.3)
+    draw_roblox_character(player_pos[0], player_pos[1], player_angle, [0.3, 0.5, 0.9] if not invisibility_active else [0.5, 0.7, 1.0])
+    
+    if camera_mode == 1:
+        draw_gun_firstperson()
+
+def render_inside():
+    glClearColor(0.1, 0.15, 0.2, 1.0)
+    draw_floor_inside()
+    draw_ceiling_inside()
+    
+                    
+    for i, wall in enumerate(walls):
+        variation = 0.02 if i % 2 == 0 else -0.02
+        glColor3f(0.28 + variation, 0.28 + variation, 0.33 + variation)
+        draw_wall_segment(wall[0], wall[1], wall[2], wall[3], wall[4])
+    
+             
+    for pickup in pickups:
+        draw_pickup(pickup)
+    
+               
+    draw_exit_door()
+    
+    for enemy in enemies:
+        draw_enemy(enemy)
+    
+    if invisibility_active:
+        glColor4f(0.3, 0.5, 0.9, 0.3)
+    draw_roblox_character(player_pos[0], player_pos[1], player_angle, [0.3, 0.5, 0.9] if not invisibility_active else [0.5, 0.7, 1.0])
+    
+    if camera_mode == 1:
+        draw_gun_firstperson()
+    
+             
+    for bullet in bullets:
+        draw_bullet(bullet)
+
+def draw_hud():
+    glClear(GL_DEPTH_BUFFER_BIT)
+    
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    gluOrtho2D(0, W, 0, H)
+    
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+    
+    glColor3f(1, 1, 1)
+    
+    draw_text(10, H - 30, f"Lives: {player_lives}/13")
+    
+    weapon_names = ['Bare Hands', 'Knife', 'Gun', 'Distraction']
+    if player_weapon_state < len(weapon_names):
+        weapon_text = weapon_names[player_weapon_state]
+        if player_weapon_state == 2:
+            weapon_text = f"Gun ({player_gun_ammo} bullets)"
+        draw_text(10, H - 55, f"Weapon: {weapon_text}")
+    
+    if invisibility_active:
+        glColor3f(0.5, 0.8, 1.0)
+        draw_text(10, H - 80, f"Invisibility: {invisibility_timer:.1f}s")
+    
+    if game_state == GAME_INSIDE:
+        glColor3f(0.5, 0.8, 1.0)
+        draw_text(W - 150, H - 30, f"LEVEL: {current_level}/3")
+        
+        def enemy_alive(e):
+            if isinstance(e, dict):
+                return e.get('hp', 0) > 0 and e.get('alive', True)
+            try:
+                return e[2] > 0
+            except Exception:
+                return False
+        living_enemies = [e for e in enemies if enemy_alive(e)]
+        if exit_door_open:
+            glColor3f(0.2, 1.0, 0.2)
+            draw_text(W - 150, H - 55, "EXIT OPEN")
+        else:
+            glColor3f(1.0, 0.8, 0.2)
+            draw_text(W - 150, H - 55, f"Enemies: {len(living_enemies)}")
+    
+    if paused:
+        glColor3f(1, 1, 1)
+        draw_text(W//2 - 40, H//2, "Paused")
+    
+    if game_state == GAME_OUTSIDE:
+        glColor3f(1, 1, 0)
+        draw_text(W//2 - 100, 50, "Find the haunted house door!")
+    elif game_state == GAME_WIN:
+        glColor3f(0, 1, 0)
+        draw_text(W//2 - 80, H//2, "YOU ESCAPED!")
+        draw_text(W//2 - 80, H//2 - 30, "Press R to restart")
+    elif game_state == GAME_LOSE:
+        glColor3f(1, 0, 0)
+        draw_text(W//2 - 100, H//2, "Game Over - Press R to Reset")
+    
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+def draw_text(x, y, text):
+    glRasterPos2f(x, y)
+    for ch in text:
+        glutBitmapCharacter(GLUT_BITMAP_9_BY_15, ord(ch))
 
 def display():
-    global last_time
-    now = time.time()
-    dt = now - last_time
-    last_time = now
-    # update
-    if game_state == STATE_PLAY:
-        update_player_movement(dt)
-        update(dt)
-    # render
-    glClear(GL_COLOR_BUFFER_BIT)
-    glViewport(0,0,WINDOW_W, WINDOW_H)
-    glMatrixMode(GL_PROJECTION)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glLoadIdentity()
-    gluPerspective(60.0, WINDOW_W / float(WINDOW_H), 1.0, 3000.0)
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-    # Use reference camera handling
-    u_fp()
-    setupCamera()
-    # draw world
-    draw_world()
-    # HUD
-    live_enemies = sum(1 for e in enemies if e['hp'] > 0)
-    draw_text_screen(10, WINDOW_H-20, f"Life: {int(player['life'])}  Level: {current_level_index+1}  Enemies: {live_enemies}")
-    draw_text_screen(10, WINDOW_H-40, f"Gun: {player['has_gun'] and player['gun_bullets'] or 0}  Knife: {player['has_knife']}  Invis: {int(player['invisible'])}")
-    if game_state == STATE_PAUSE:
-        draw_text_screen(WINDOW_W/2-60, WINDOW_H/2, "PAUSED")
-    if game_state == STATE_GAMEOVER:
-        draw_text_screen(WINDOW_W/2-120, WINDOW_H/2, "GAME OVER - press R to reset")
+    glViewport(0, 0, W, H)
+    
+    setup_camera()
+    
+                                                                         
+    if game_state == GAME_OUTSIDE:
+        render_outside()
+    elif game_state == GAME_INSIDE:
+        render_inside()
+    elif game_state == GAME_WIN or game_state == GAME_LOSE:
+                                                                          
+        if last_game_state == GAME_INSIDE:
+            render_inside()
+        else:
+            render_outside()
+    
+    draw_hud()
+    
     glutSwapBuffers()
 
+                           
+       
+                           
+def keyboard_down(key, x, y):
+    global player_ammo, bullets, fire_cooldown, debug_mode, camera_mode
+    global player_weapon_state, player_powerups, player_gun_ammo, player_lives, paused
+    
+                                                                       
+    keys_pressed.add(key)
+    key_timestamps[key] = int(time.perf_counter() * 1000)
+    
+    if key == b'r':
+        reset_game()
+        glutPostRedisplay()
+    elif key == b'm':
+        debug_mode = not debug_mode
+    elif key == b'c' or key == b'C':
+                                                                  
+        camera_mode = 1 - camera_mode
+        glutPostRedisplay()
+    elif key == b'e' or key == b'E':
+        if player_weapon_state == 0:
+            if player_powerups.get('knife'):
+                player_weapon_state = 1
+            elif player_powerups.get('gun') and player_gun_ammo > 0:
+                player_weapon_state = 2
+            elif player_powerups.get('distraction'):
+                player_weapon_state = 3
+        elif player_weapon_state == 1:
+            if player_powerups.get('gun') and player_gun_ammo > 0:
+                player_weapon_state = 2
+            elif player_powerups.get('distraction'):
+                player_weapon_state = 3
+            else:
+                player_weapon_state = 0
+        elif player_weapon_state == 2:
+            if player_powerups.get('distraction'):
+                player_weapon_state = 3
+            else:
+                player_weapon_state = 0
+        elif player_weapon_state == 3:
+            player_weapon_state = 0
+        else:
+            player_weapon_state = 0
+        glutPostRedisplay()
+    elif key == b'p' or key == b'P':
+        paused = not paused
+        glutPostRedisplay()
+    elif key == b'f' or key == b' ':
+        pass
+    elif key == b'\x1b':       
+        import sys
+        sys.exit(0)
 
-def idle():
+def keyboard_up(key, x, y):
+                                                               
+    keys_pressed.discard(key)
+    if key in key_timestamps:
+        del key_timestamps[key]
+
+def special_key(key, x, y):
+    global player_angle
+    
+    if key == GLUT_KEY_LEFT:
+        player_angle = normalize_angle(player_angle + 3)
+    elif key == GLUT_KEY_RIGHT:
+        player_angle = normalize_angle(player_angle - 3)
+
+def mouse(button, state, x, y):
+    global player_ammo, bullets, fire_cooldown, player_weapon_state, player_gun_ammo, distraction, player_powerups
+
+    if button == GLUT_LEFT_BUTTON and state == GLUT_DOWN:
+        if player_weapon_state == 2 and player_gun_ammo > 0 and fire_cooldown <= 0:
+            player_gun_ammo -= 1
+            if player_gun_ammo <= 0:
+                player_powerups['gun'] = False
+                player_weapon_state = 0
+            fire_cooldown = int(FIRE_COOLDOWN / player_fire_rate)
+            gun_pos = get_gun_position(player_pos[0], player_pos[1], player_angle)
+            rad = math.radians(player_angle)
+            vx = math.cos(rad) * BULLET_SPEED
+            vy = math.sin(rad) * BULLET_SPEED
+            bullets.append([gun_pos[0], gun_pos[1], gun_pos[2], vx, vy, 0, BULLET_LIFETIME])
+
+    if button == GLUT_RIGHT_BUTTON and state == GLUT_DOWN:
+        if player_weapon_state == 3:
+            rad = math.radians(player_angle)
+            dx = math.cos(rad)
+            dy = math.sin(rad)
+            sx = player_pos[0] + dx * 10
+            sy = player_pos[1] + dy * 10
+            distraction = {'x': sx, 'y': sy, 'dx': dx, 'dy': dy, 'dist_left': 7.0, 'landed': False, 'created': time.perf_counter()}
+            player_powerups['distraction'] = False
+            player_weapon_state = 0
+
+def update_enemies():
+    global player_hp, game_state, last_game_state, invisibility_active, player_lives, bullets
+    now = time.perf_counter()
+    level_def = LEVEL_DEFS.get(current_level, LEVEL_DEFS[1])
+    enemy_damage = level_def.get('enemy_damage', ENEMY_DAMAGE)
+    
+    for e in enemies:
+        if not e.get('alive', True):
+            continue
+        
+        old_angle = e.get('angle', 0)
+        e['angle'] = (old_angle + e.get('rot_dir', 1) * 1.5) % 360
+        
+        rad = math.radians(e['angle'])
+        cone_end_x = e['x'] + math.cos(rad) * CONE_LENGTH
+        cone_end_y = e['y'] + math.sin(rad) * CONE_LENGTH
+        
+        if line_intersects_wall(e['x'], e['y'], cone_end_x, cone_end_y):
+            e['rot_dir'] = -e.get('rot_dir', 1)
+            e['angle'] = old_angle
+        
+        player_detectable = not invisibility_active
+        
+        dx = player_pos[0] - e['x']
+        dy = player_pos[1] - e['y']
+        dist = math.hypot(dx, dy)
+        
+        if dist <= CONE_LENGTH and player_detectable:
+            ang_to_player = math.degrees(math.atan2(dy, dx))
+            diff = abs(normalize_angle(ang_to_player - e['angle']))
+            if diff > 180:
+                diff = 360 - diff
+            if diff < CONE_ANGLE and not line_intersects_wall(e['x'], e['y'], player_pos[0], player_pos[1]):
+                e['alerted'] = True
+                e['alert_timer'] = now
+                
+                if now > e.get('attack_cd', 0):
+                    # Enemy shoots a bullet at player - aim at player's position
+                    angle_to_player = math.atan2(dy, dx)
+                    vx = math.cos(angle_to_player) * BULLET_SPEED * 0.7
+                    vy = math.sin(angle_to_player) * BULLET_SPEED * 0.7
+                    bullets.append([e['x'], e['y'], 20, vx, vy, 0, BULLET_LIFETIME])
+                    e['attack_cd'] = now + 0.7
+        
+        if e.get('alerted'):
+            if dist > 25 or not player_detectable:
+                if now - e.get('alert_timer', now) > 2.0:
+                    e['alerted'] = False
+        
+        if e.get('distraction_until', 0) > now:
+            tx, ty = e.get('distraction_target', (e['x'], e['y']))
+            e['angle'] = math.degrees(math.atan2(ty - e['y'], tx - e['x']))
+        
+        if e.get('alerted'):
+            for other in enemies:
+                if other is e or not other.get('alive'):
+                    continue
+                if other.get('corridor') == e.get('corridor'):
+                    d = math.hypot(other['x'] - e['x'], other['y'] - e['y'])
+                    if 10 <= d <= 15:
+                        other['alerted'] = True
+                        other['alert_timer'] = now
+
+
+def update():
+    global animation_time, player_moved_this_frame, fire_cooldown, last_update_time, player_angle
+    global exit_door_open, player_lives, game_state, last_game_state
+    
+    current_time = int(time.perf_counter() * 1000)
+    last_update_time = current_time
+
+    for k, t in list(key_timestamps.items()):
+        if current_time - t > KEY_HOLD_MS:
+            keys_pressed.discard(k)
+            del key_timestamps[k]
+
+    if paused:
+        glutPostRedisplay()
+        return
+
+    animation_time += 0.1
+    player_moved_this_frame = False
+    
+    if fire_cooldown > 0:
+        fire_cooldown -= 1
+    
+    if game_state in [GAME_WIN, GAME_LOSE]:
+        glutPostRedisplay()
+        return
+    
+                                                                        
+    speed = MOVE_SPEED
+    old_x, old_y = player_pos[0], player_pos[1]
+
+                        
+    if b'a' in keys_pressed:
+        player_angle = normalize_angle(player_angle + 3)
+    if b'd' in keys_pressed:
+        player_angle = normalize_angle(player_angle - 3)
+
+                  
+    if b'w' in keys_pressed:
+        rad = math.radians(player_angle)
+        new_x = player_pos[0] + math.cos(rad) * speed
+        new_y = player_pos[1] + math.sin(rad) * speed
+        if not check_wall_collision(new_x, new_y, PLAYER_RADIUS):
+            player_pos[0] = new_x
+            player_pos[1] = new_y
+    if b's' in keys_pressed:
+        rad = math.radians(player_angle)
+        new_x = player_pos[0] - math.cos(rad) * speed
+        new_y = player_pos[1] - math.sin(rad) * speed
+        if not check_wall_collision(new_x, new_y, PLAYER_RADIUS):
+            player_pos[0] = new_x
+            player_pos[1] = new_y
+    
+    if old_x != player_pos[0] or old_y != player_pos[1]:
+        player_moved_this_frame = True
+    
+                       
+    update_player()
+    update_camera()
+    update_bullets()
+    update_pickups()
+    update_enemies()
+    global distraction, invisibility_timer, invisibility_active, player_collision_damage_cooldown, player_knife_hits, player_barehands_hits
+    
+    if player_collision_damage_cooldown > 0:
+        player_collision_damage_cooldown -= 1
+    
+    if game_state == GAME_INSIDE and player_collision_damage_cooldown <= 0:
+        for e in enemies:
+            if not e.get('alive'):
+                continue
+            ex = e.get('x', 0)
+            ey = e.get('y', 0)
+            dist = distance_2d(player_pos[0], player_pos[1], ex, ey)
+            
+            if dist < PLAYER_RADIUS + ENEMY_RADIUS:
+                eid = id(e)
+                if player_weapon_state == 1:
+                    player_knife_hits[eid] = player_knife_hits.get(eid, 0) + 1
+                    if player_knife_hits[eid] >= 2:
+                        e['hp'] = 0
+                        e['alive'] = False
+                    player_collision_damage_cooldown = 15
+                elif player_weapon_state == 0:
+                    player_barehands_hits[eid] = player_barehands_hits.get(eid, 0) + 1
+                    if player_barehands_hits[eid] >= 3:
+                        e['hp'] = 0
+                        e['alive'] = False
+                    player_collision_damage_cooldown = 15
+    
+    if distraction:
+        if not distraction.get('landed'):
+            step = 0.5
+                                                         
+            nx = distraction['x'] + distraction['dx'] * step
+            ny = distraction['y'] + distraction['dy'] * step
+                                  
+            if line_intersects_wall(distraction['x'], distraction['y'], nx, ny):
+                distraction['landed'] = True
+            else:
+                distraction['x'] = nx
+                distraction['y'] = ny
+                distraction['dist_left'] -= step
+                if distraction['dist_left'] <= 0:
+                    distraction['landed'] = True
+        else:
+                                                                 
+            for e in enemies:
+                if not e.get('alive'):
+                    continue
+                d = math.hypot(e['x'] - distraction['x'], e['y'] - distraction['y'])
+                if d <= 5.0:
+                    e['distraction_until'] = time.perf_counter() + 3.0
+                    e['distraction_target'] = (distraction['x'], distraction['y'])
+                                         
+            if time.perf_counter() - distraction.get('created', 0) > 3.0:
+                distraction = None
+
+    if invisibility_timer > 0:
+        invisibility_timer -= 0.1
+        if invisibility_timer <= 0:
+            player_powerups['invisibility'] = False
+            invisibility_active = False
+        else:
+            invisibility_active = True
+    else:
+        invisibility_active = False
+
+                                                                                        
+                                                                           
+    if game_state == GAME_INSIDE:
+        living_enemies = [e for e in enemies if e.get('alive', True) and e.get('hp', 1) > 0]
+        if not living_enemies:
+            exit_door_open = True
+    
     glutPostRedisplay()
 
 
-def mouse(button, state, x, y):
-    global fp, pcamera_pos, camera_pos, camera_mode
-    # left mouse fires/melees
-    if button == GLUT_LEFT_BUTTON and state == GLUT_DOWN:
-        melee_or_fire()
-    # right mouse toggles first-person mode similar to reference
-    if button == GLUT_RIGHT_BUTTON and state == GLUT_DOWN:
-        # toggle camera mode
-        if camera_mode == CAM_THIRD:
-            camera_mode = CAM_FIRST
-            pcamera_pos = camera_pos
-        else:
-            camera_mode = CAM_THIRD
-            camera_pos = pcamera_pos
+def idle():
+                                                                       
+                                                                   
+    current_ms = int(time.perf_counter() * 1000)
+    if current_ms - last_update_time >= FRAME_TIME:
+        update()
 
-# ---------------------------
-# Reset and init
-# ---------------------------
-
-def reset_game():
-    global player, bullets, current_level_index, game_state, camera_pos, pcamera_pos, camera_mode, keys, global_alarm_level, global_alarm_meter
-    # Reset player
-    player['life'] = 13
-    player['has_gun'] = False
-    player['gun_bullets'] = 0
-    player['has_knife'] = False
-    player['invisible'] = False
-    player['invis_timer'] = 0.0
-    player['melee_timer'] = 0.0
-    player['detection_meter'] = 0.0
-    player['in_hiding_spot'] = False
-    player['hacking_terminal'] = None
-    player['hacking_progress'] = 0.0
-    # Reset game state
-    bullets.clear()
-    keys.clear()
-    game_state = STATE_PLAY
-    camera_mode = CAM_THIRD
-    camera_pos = (0.0, 500.0, 500.0)
-    pcamera_pos = camera_pos
-    global_alarm_level = ALARM_LEVEL_0
-    global_alarm_meter = 0.0
-    # Reload level
-    load_level(current_level_index)
-
-# ---------------------------
-# Entry point
-# ---------------------------
-
+                           
+      
+                           
 def main():
-    global last_time
-    glutInit(sys.argv)
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB)
-    glutInitWindowSize(WINDOW_W, WINDOW_H)
-    glutInitWindowPosition(50, 50)
-    glutCreateWindow(b"Stealth Maze - Minimal PyOpenGL")
+    global quadric
+    
+    glutInit()
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
+    glutInitWindowSize(W, H)
+    glutInitWindowPosition(100, 50)
+    glutCreateWindow(b"Haunted House Survival")
+    
+                                                                 
+                                                                                   
+    quadric = gluNewQuadric()
+                                                                                
+    glEnable(GL_DEPTH_TEST)
+    
+    glClearColor(0.1, 0.15, 0.2, 1.0)
+    
+    reset_game()
+    
     glutDisplayFunc(display)
-    glutIdleFunc(idle)
-    glutKeyboardFunc(keyboard)
-    glutKeyboardUpFunc(keyboard_up)
+    glutKeyboardFunc(keyboard_down)
+                                                                                                 
     glutSpecialFunc(special_key)
     glutMouseFunc(mouse)
-    # initialize
-    load_level(current_level_index)
-    last_time = time.time()
+    glutIdleFunc(idle)                                                           
+    
     glutMainLoop()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
